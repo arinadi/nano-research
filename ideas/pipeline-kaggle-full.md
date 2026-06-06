@@ -40,9 +40,14 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 # Target: Kaggle Free GPU (T4 16GB)
 # ============================================================
 
-!pip install -q faster-whisper accelerate librosa soundfile bitsandbytes
-!pip install -q git+https://github.com/huggingface/transformers.git  # butuh versi terbaru untuk Gemma 4
-!pip install -q "pillow==11.1.0" --force-reinstall --no-deps  # fix pillow conflict dengan torchvision
+import warnings
+warnings.filterwarnings("ignore")
+
+import os, sys
+# Suppress pip dependency warnings (dask-cuda, cuml, cudf conflicts — tidak dipakai pipeline ini)
+!pip install -q faster-whisper accelerate librosa soundfile bitsandbytes 2>&1 | grep -v "ERROR\|requires\|incompatible"
+!pip install -q git+https://github.com/huggingface/transformers.git 2>&1 | grep -v "ERROR\|requires\|incompatible"
+!pip install -q "pillow==11.1.0" --force-reinstall --no-deps 2>&1 | grep -v "ERROR\|requires\|incompatible"
 
 import os, time, torch, gc
 import numpy as np
