@@ -300,6 +300,170 @@ def summarize_transcript(proc, model, transcript: str, context: str = "") -> str
 
 
 # ============================================================
+# MODULE 2.5: UPLOAD WIDGET
+# ============================================================
+
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+from google.colab import files
+import shutil
+
+# ── State ──
+upload_state = {"audio": None, "images": []}
+
+# ── Widget: Audio Upload ──
+audio_output = widgets.Output()
+audio_btn = widgets.Button(description="🎙️ Upload Audio", button_style="primary",
+                           layout=widgets.Layout(width="200px"))
+
+def on_audio_upload(btn):
+    with audio_output:
+        clear_output()
+        print("📂 Pilih file audio (WAV, MP3, FLAC, M4A)...")
+        uploaded = files.upload()
+        if uploaded:
+            fname = list(uploaded.keys())[0]
+            dest = f"/tmp/upload_{fname}"
+            shutil.move(fname, dest)
+            upload_state["audio"] = dest
+            print(f"✅ Audio: {fname} ({os.path.getsize(dest)/1e6:.1f} MB)")
+
+audio_btn.on_click(on_audio_upload)
+
+# ── Widget: Image Upload (multi) ──
+image_output = widgets.Output()
+image_btn = widgets.Button(description="📷 Upload Foto Nota", button_style="success",
+                           layout=widgets.Layout(width="200px"))
+image_list_label = widgets.Label(value="Belum ada foto")
+
+def on_image_upload(btn):
+    with image_output:
+        clear_output()
+        print("📂 Pilih foto nota/invoice (bisa multiple)...")
+        uploaded = files.upload()
+        for fname in uploaded.keys():
+            dest = f"/tmp/upload_{fname}"
+            shutil.move(fname, dest)
+            upload_state["images"].append(dest)
+            print(f"  ✅ {fname} ({os.path.getsize(dest)/1e6:.1f} MB)")
+        image_list_label.value = f"{len(upload_state['images'])} foto siap"
+
+image_btn.on_click(on_image_upload)
+
+# ── Widget: Reset ──
+reset_btn = widgets.Button(description="🗑️ Reset", button_style="danger",
+                           layout=widgets.Layout(width="100px"))
+
+def on_reset(btn):
+    upload_state["audio"] = None
+    upload_state["images"] = []
+    image_list_label.value = "Belum ada foto"
+    with audio_output:
+        clear_output()
+        print("Audio: belum ada")
+    with image_output:
+        clear_output()
+        print("Foto: belum ada")
+
+reset_btn.on_click(on_reset)
+
+# ── Widget: Run Pipeline ──
+run_btn = widgets.Button(description="🚀 Run Pipeline", button_style="warning",
+                         layout=widgets.Layout(width="200px"))
+run_output = widgets.Output()
+
+def on_run(btn):
+    if not upload_state["audio"] and not upload_state["images"]:
+        with run_output:
+            clear_output()
+            print("⚠️ Upload audio atau foto dulu!")
+        return
+
+    with run_output:
+        clear_output()
+        print("=" * 50)
+        print("🚀 MEMPROSES...")
+        print("=" * 50)
+
+        result = {}
+
+        # Transcript
+        if upload_state["audio"]:
+            print("\n🎙️ [1] Transcribing audio...")
+            whisper_m, batched = load_whisper()
+            transcript = transcribe_audio(upload_state["audio"], language="id")
+            result["transcript"] = transcript["text"]
+            print(f"  ✅ {len(transcript['text'])} chars")
+            unload_whisper(whisper_m)
+
+        # OCR + Summary
+        if upload_state["audio"] or upload_state["images"]:
+            print("\n🤖 [2] Loading Gemma 4 E4B...")
+            proc, gemma = load_gemma()
+
+            if upload_state["audio"] and result.get("transcript"):
+                print("📋 Summarizing...")
+                result["summary"] = summarize_transcript(
+                    proc, gemma, result["transcript"], context="rekaman audio"
+                )
+                print("  ✅ Summary done")
+
+            if upload_state["images"]:
+                result["ocr"] = []
+                for img_path in upload_state["images"]:
+                    print(f"📄 OCR: {os.path.basename(img_path)}")
+                    ocr = ocr_image(proc, gemma, img_path)
+                    result["ocr"].append({"file": os.path.basename(img_path), "text": ocr})
+                    print(f"  ✅ Done")
+
+            unload_gemma(proc, gemma)
+
+        # ── Tampilkan Hasil ──
+        print("\n" + "=" * 50)
+        print("📊 HASIL")
+        print("=" * 50)
+
+        if result.get("transcript"):
+            print(f"\n🎙️ TRANSCRIPT ({len(result['transcript'])} chars):")
+            print(result["transcript"][:500] + ("..." if len(result["transcript"]) > 500 else ""))
+
+        if result.get("summary"):
+            print(f"\n📋 RINGKASAN:")
+            print(result["summary"])
+
+        if result.get("ocr"):
+            for item in result["ocr"]:
+                print(f"\n📄 OCR — {item['file']}:")
+                print(item["text"][:300] + ("..." if len(item["text"]) > 300 else ""))
+
+        print("\n" + "=" * 50)
+        print("✅ Selesai!")
+        print("=" * 50)
+
+run_btn.on_click(on_run)
+
+# ── Layout ──
+header = widgets.HTML("<h3>📁 Upload Files</h3>")
+audio_section = widgets.VBox([
+    widgets.HTML("<b>Audio (untuk transkripsi + ringkasan):</b>"),
+    audio_btn, audio_output
+])
+image_section = widgets.VBox([
+    widgets.HTML("<b>Foto Nota (untuk OCR):</b>"),
+    image_btn, image_list_label, image_output
+])
+actions = widgets.HBox([run_btn, reset_btn])
+
+display(widgets.VBox([
+    header,
+    audio_section,
+    image_section,
+    widgets.HBox([actions]),
+    run_output,
+]))
+
+
+# ============================================================
 # MODULE 3: FULL PIPELINE (Sequential Loading)
 # ============================================================
 # Whisper dan Gemma load bergantian — tidak muat di VRAM bersamaan.
