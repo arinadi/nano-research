@@ -514,72 +514,11 @@ def full_pipeline(audio_path: str, image_paths: list = None) -> dict:
 
 
 # ============================================================
-# TEST — Sequential: Whisper dulu, lalu Gemma
+# RUN: Widget sudah ditampilkan di atas.
+# Klik "🎙️ Upload Audio" atau "📷 Upload Foto Nota",
+# lalu klik "🚀 Run Pipeline".
 # ============================================================
-
-print("\n[3/3] Running pipeline tests (sequential)...")
-print("-" * 40)
-
-# --- TEST A: Whisper Transcript ---
-print("\n🎙️ TEST A: Whisper Transcript")
-# (Skip jika tidak ada file audio — uncomment untuk test)
-# result = transcribe_audio("/kaggle/input/your-audio/recording.mp3", language="id")
-# print(f"  Hasil: {result['text'][:200]}...")
-print("  (Skip — tidak ada file audio untuk test)")
-
-# Unload Whisper
-unload_whisper(whisper_model)
-
-# --- Load Gemma ---
-print("\n🤖 Loading Gemma 4 E4B...")
-proc, gemma = load_gemma()
-
-# --- TEST B: OCR ---
-print("\n📄 TEST B: OCR dari gambar teks")
-
-from PIL import ImageDraw
-test_img = Image.new("RGB", (500, 250), color=(248, 245, 235))
-draw = ImageDraw.Draw(test_img)
-lines = [
-    "INVOICE #2026-0601",
-    "Tanggal: 5 Juni 2026",
-    "",
-    "Produk A    x2    Rp  500.000",
-    "Produk B    x1    Rp  350.000",
-    "Ongkos Kirim      Rp   50.000",
-    "─────────────────────────────",
-    "TOTAL             Rp  900.000",
-]
-y = 20
-for line in lines:
-    draw.text((30, y), line, fill=(20, 20, 20))
-    y += 28
-
-t0 = time.time()
-ocr_result = ocr_image(proc, gemma, test_img, language_hint="Indonesia")
-print(f"  Hasil OCR ({time.time()-t0:.1f}s):")
-print(f"  {ocr_result}")
-
-# --- TEST C: Summarization ---
-print("\n📋 TEST C: Summarization teks panjang")
-
-sample_text = """
-Transformasi digital di sektor kesehatan Indonesia mengalami percepatan signifikan
-sejak 2024. Kementerian Kesehatan meluncurkan platform SATUSEHAT yang mengintegrasikan
-rekam medis elektronik dari lebih dari 3.000 fasilitas kesehatan.
-"""
-
-t0 = time.time()
-summary_result = summarize_text(proc, gemma, sample_text, output_language="Indonesia", style="ringkas")
-print(f"  Hasil Summary ({time.time()-t0:.1f}s):")
-print(f"  {summary_result}")
-
-# --- CLEANUP ---
-unload_gemma(proc, gemma)
-
-print("\n" + "=" * 60)
-print("✅ Semua test selesai!")
-print("=" * 60)
+print("✅ Semua module loaded. Gunakan widget di atas untuk upload & proses.")
 ```
 
 ---
