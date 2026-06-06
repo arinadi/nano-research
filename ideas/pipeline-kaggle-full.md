@@ -157,7 +157,7 @@ GEMMA_MODEL_ID = "google/gemma-4-E4B-it"
 def load_gemma():
     print("\n[2/3] Loading Gemma 4 E4B...")
     t0 = time.time()
-    proc = AutoProcessor.from_pretrained(GEMMA_MODEL_ID)
+    proc = AutoProcessor.from_pretrained(GEMMA_MODEL_ID, trust_remote_code=True)
 
     # Cari GPU dengan VRAM paling banyak
     free_mem = [(i, torch.cuda.mem_get_info(i)[0]) for i in range(torch.cuda.device_count())]
@@ -169,6 +169,7 @@ def load_gemma():
         GEMMA_MODEL_ID,
         dtype=torch.bfloat16,
         device_map=f"cuda:{best_gpu[0]}",
+        trust_remote_code=True,
     )
     model.eval()
     print(f"  ✅ Gemma loaded in {time.time()-t0:.1f}s")
