@@ -300,57 +300,27 @@ def summarize_transcript(proc, model, transcript: str, context: str = "") -> str
 
 
 # ============================================================
-# MODULE 2.5: UPLOAD & JALANKAN PIPELINE
+# MODULE 2.5: JALANKAN PIPELINE
 # ============================================================
-# Jalankan cell ini, lalu ikuti instruksi di output.
+# Isi path file di bawah, lalu run cell ini.
 
-from google.colab import files
-import shutil
-
-def upload_file(label="file"):
-    """Upload satu file, return path lokal."""
-    print(f"\n📂 Upload {label}...")
-    uploaded = files.upload()
-    if not uploaded:
-        return None
-    fname = list(uploaded.keys())[0]
-    dest = f"/tmp/upload_{fname}"
-    shutil.move(fname, dest)
-    print(f"  ✅ {fname} ({os.path.getsize(dest)/1e6:.1f} MB)")
-    return dest
+# ── ISI PATH FILE DI SINI ──
+AUDIO_PATH = ""          # contoh: "/kaggle/input/recording.mp3"
+IMAGE_PATHS = []         # contoh: ["/kaggle/input/nota1.jpg", "/kaggle/input/nota2.png"]
+# ────────────────────────────
 
 print("=" * 50)
-print("📁 UPLOAD FILES")
+print("📊 INPUT")
+print("=" * 50)
+print(f"  Audio: {AUDIO_PATH if AUDIO_PATH else '❌ tidak ada'}")
+print(f"  Foto:  {len(IMAGE_PATHS)} file")
+if IMAGE_PATHS:
+    for p in IMAGE_PATHS:
+        print(f"    - {p}")
 print("=" * 50)
 
-# ── Audio ──
-audio_path = None
-audio_input = input("🎙️ Upload audio? (y/n): ").strip().lower()
-if audio_input == "y":
-    audio_path = upload_file("audio (WAV/MP3/FLAC/M4A)")
-
-# ── Foto Nota ──
-image_paths = []
-foto_input = input("\n📷 Upload foto nota? (y/n): ").strip().lower()
-if foto_input == "y":
-    while True:
-        img_path = upload_file("foto nota")
-        if img_path:
-            image_paths.append(img_path)
-        lagi = input("  Upload lagi? (y/n): ").strip().lower()
-        if lagi != "y":
-            break
-
-# ── Ringkasan ──
-print("\n" + "=" * 50)
-print("📊 RINGKASAN UPLOAD")
-print("=" * 50)
-print(f"  Audio: {'✅ ' + audio_path if audio_path else '❌ tidak ada'}")
-print(f"  Foto:  {len(image_paths)} file")
-print("=" * 50)
-
-if not audio_path and not image_paths:
-    print("\n⚠️ Tidak ada file diupload. Jalankan cell ini lagi.")
+if not AUDIO_PATH and not IMAGE_PATHS:
+    print("\n⚠️ Isi AUDIO_PATH atau IMAGE_PATHS dulu, lalu run cell ini lagi.")
 else:
     print("\n🚀 Menjalankan pipeline...")
     print("-" * 50)
@@ -358,10 +328,10 @@ else:
     result = {}
 
     # ── Phase 1: Transcript ──
-    if audio_path:
+    if AUDIO_PATH:
         print("\n🎙️ [1/2] Transcribing audio...")
         whisper_m, batched = load_whisper()
-        transcript = transcribe_audio(audio_path, language="id")
+        transcript = transcribe_audio(AUDIO_PATH, language="id")
         result["transcript"] = transcript["text"]
         print(f"  ✅ Transcript: {len(transcript['text'])} chars")
         unload_whisper(whisper_m)
@@ -370,16 +340,16 @@ else:
     print("\n🤖 [2/2] Loading Gemma 4 E4B...")
     proc, gemma = load_gemma()
 
-    if audio_path and result.get("transcript"):
+    if AUDIO_PATH and result.get("transcript"):
         print("📋 Summarizing...")
         result["summary"] = summarize_transcript(
             proc, gemma, result["transcript"], context="rekaman audio"
         )
         print("  ✅ Summary done")
 
-    if image_paths:
+    if IMAGE_PATHS:
         result["ocr"] = []
-        for img_path in image_paths:
+        for img_path in IMAGE_PATHS:
             print(f"📄 OCR: {os.path.basename(img_path)}")
             ocr = ocr_image(proc, gemma, img_path)
             result["ocr"].append({"file": os.path.basename(img_path), "text": ocr})
