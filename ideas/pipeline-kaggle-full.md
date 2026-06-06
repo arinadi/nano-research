@@ -23,9 +23,11 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 | Component | VRAM |
 |---|---|
 | Faster-Whisper large-v3 (FP16) | ~3 GB |
-| Gemma 4 E4B (bfloat16) | ~8 GB |
+| Gemma 4 E4B (8-bit quantized) | ~5 GB |
 | OS + overhead | ~2 GB |
-| **Total** | **~13 GB** (muat di T4 16GB) |
+| **Total** | **~10 GB** (muat di T4 16GB) |
+
+> **Note:** Sequential loading — Whisper dan Gemma load bergantian, tidak bersamaan.
 
 ---
 
@@ -38,7 +40,7 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 # Target: Kaggle Free GPU (T4 16GB)
 # ============================================================
 
-!pip install -q faster-whisper accelerate librosa soundfile
+!pip install -q faster-whisper accelerate librosa soundfile bitsandbytes
 !pip install -q git+https://github.com/huggingface/transformers.git  # butuh versi terbaru untuk Gemma 4
 !pip install -q "pillow==11.1.0" --force-reinstall --no-deps  # fix pillow conflict dengan torchvision
 
@@ -165,9 +167,15 @@ def load_gemma():
     print(f"  📊 GPU options: {[(i, f'{m/1e9:.1f}GB free') for i, m in free_mem]}")
     print(f"  🎯 Using GPU {best_gpu[0]} ({best_gpu[1]/1e9:.1f}GB free)")
 
+    from transformers import BitsAndBytesConfig
+    bnb_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+
     model = AutoModelForImageTextToText.from_pretrained(
         GEMMA_MODEL_ID,
-        dtype=torch.bfloat16,
+        quantization_config=bnb_config,
         device_map=f"cuda:{best_gpu[0]}",
         trust_remote_code=True,
     )
