@@ -428,6 +428,8 @@ else:
             print(f"  📊 Audio: {duration:.1f}s → {len(chunks)} chunk(s) à {chunk_sec}s")
 
             gemma_transcript_parts = []
+            gemma_transcript_total_time = 0
+            gemma_transcript_total_tokens = 0
             for ci, chunk in enumerate(chunks):
                 chunk_path = f"/tmp/gemma_chunk_{ci}.wav"
                 sf.write(chunk_path, chunk, sr)
@@ -457,16 +459,19 @@ else:
                 print(f"  🎙️ Chunk {ci+1}/{len(chunks)}...", end=" ", flush=True)
                 chunk_result = gemma_generate(proc, gemma, messages, max_new_tokens=800)
                 gemma_transcript_parts.append(chunk_result["text"])
+                gemma_transcript_total_time += chunk_result["time_s"]
+                gemma_transcript_total_tokens += chunk_result["output_tokens"]
                 print(f"✅ {chunk_result['output_tokens']} tokens | {chunk_result['time_s']}s | {chunk_result['tps']} tok/s")
 
                 os.remove(chunk_path)
 
             gemma_full_transcript = " ".join(gemma_transcript_parts)
             result["gemma_transcript"] = gemma_full_transcript
-            print(f"  ✅ Gemma transcript total: {len(gemma_full_transcript)} chars")
+            gemma_tps_avg = gemma_transcript_total_tokens / gemma_transcript_total_time if gemma_transcript_total_time > 0 else 0
+            print(f"  ✅ Gemma transcript total: {len(gemma_full_transcript)} chars | {gemma_transcript_total_time:.1f}s | {gemma_tps_avg:.1f} tok/s")
 
             # Simpan metrics
-            metrics.append(f"Gemma transcript ({len(chunks)} chunks): {len(gemma_full_transcript)} chars")
+            metrics.append(f"Gemma transcript ({len(chunks)} chunks): {len(gemma_full_transcript)} chars | {gemma_transcript_total_time:.1f}s | {gemma_tps_avg:.1f} tok/s")
 
         except Exception as e:
             print(f"  ⚠️ Gemma transcript error: {e}")
