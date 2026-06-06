@@ -159,10 +159,17 @@ def load_gemma():
     print("\n[2/3] Loading Gemma 4 E4B...")
     t0 = time.time()
     proc = AutoProcessor.from_pretrained(GEMMA_MODEL_ID)
+
+    # Cari GPU dengan VRAM paling banyak
+    free_mem = [(i, torch.cuda.mem_get_info(i)[0]) for i in range(torch.cuda.device_count())]
+    best_gpu = max(free_mem, key=lambda x: x[1])
+    print(f"  📊 GPU options: {[(i, f'{m/1e9:.1f}GB free') for i, m in free_mem]}")
+    print(f"  🎯 Using GPU {best_gpu[0]} ({best_gpu[1]/1e9:.1f}GB free)")
+
     model = AutoModelForImageTextToText.from_pretrained(
         GEMMA_MODEL_ID,
         dtype=torch.bfloat16,
-        device_map="auto",
+        device_map=f"cuda:{best_gpu[0]}",
     )
     model.eval()
     print(f"  ✅ Gemma loaded in {time.time()-t0:.1f}s")
