@@ -23,11 +23,12 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 | Component | VRAM |
 |---|---|
 | Faster-Whisper large-v3 (FP16) | ~3 GB |
-| Gemma 4 E4B (8-bit quantized) | ~5 GB |
+| Gemma 4 E4B (bfloat16, split 2 GPU) | ~8 GB |
 | OS + overhead | ~2 GB |
-| **Total** | **~10 GB** (muat di T4 16GB) |
+| **Total** | **~13 GB** (split ke 2× T4 16GB) |
 
-> **Note:** Sequential loading — Whisper dan Gemma load bergantian, tidak bersamaan.
+> **Note:** Sequential loading — Whisper dan Gemma load bergantian.
+> Gemma di-split ke 2 GPU via `device_map="auto"`.
 
 ---
 
@@ -162,32 +163,27 @@ from transformers import AutoProcessor, AutoModelForImageTextToText
 GEMMA_MODEL_ID = "google/gemma-4-E4B-it"
 
 def load_gemma():
-    print("\n[2/3] Loading Gemma 4 E4B...")
+    print("\n[2/3] Loading Gemma 4 E4B (full bfloat16, split 2 GPU)...")
     t0 = time.time()
     proc = AutoProcessor.from_pretrained(GEMMA_MODEL_ID, trust_remote_code=True)
 
-    # Cari GPU dengan VRAM paling banyak
-    free_mem = [(i, torch.cuda.mem_get_info(i)[0]) for i in range(torch.cuda.device_count())]
-    best_gpu = max(free_mem, key=lambda x: x[1])
-    print(f"  📊 GPU options: {[(i, f'{m/1e9:.1f}GB free') for i, m in free_mem]}")
-    print(f"  🎯 Using GPU {best_gpu[0]} ({best_gpu[1]/1e9:.1f}GB free)")
-
-    from transformers import BitsAndBytesConfig
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_quant_type="nf4",
-    )
+    # Tampilkan info GPU
+    for i in range(torch.cuda.device_count()):
+        free, total = torch.cuda.mem_get_info(i)
+        print(f"  📊 GPU {i}: {free/1e9:.1f}GB free / {total/1e9:.1f}GB total")
 
     model = AutoModelForImageTextToText.from_pretrained(
         GEMMA_MODEL_ID,
-        quantization_config=bnb_config,
-        device_map=f"cuda:{best_gpu[0]}",
+        dtype=torch.bfloat16,
+        device_map="auto",   # split ke 2 GPU otomatis
         trust_remote_code=True,
+        low_cpu_mem_usage=True,
     )
     model.eval()
     print(f"  ✅ Gemma loaded in {time.time()-t0:.1f}s")
-    print(f"  VRAM: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+    for i in range(torch.cuda.device_count()):
+        used = torch.cuda.memory_allocated(i) / 1e9
+        print(f"  📊 GPU {i} VRAM used: {used:.2f} GB")
     return proc, model
 
 def unload_gemma(proc, model):
@@ -199,8 +195,8 @@ def unload_gemma(proc, model):
     print("  🧹 Gemma unloaded from VRAM")
 
 
-def gemma_generate(proc, model, messages: list, max_new_tokens: int = 512) -> str:
-    """Helper untuk generate dari Gemma 4 E4B."""
+def gemma_generate(proc, model, messages: list, max_new_tokens: int = 512) -> dict:
+    """Helper untuk generate dari Gemma 4 E4B. Return dict dengan text + metrics."""
     inputs = proc.apply_chat_template(
         messages,
         add_generation_prompt=True,
@@ -211,21 +207,31 @@ def gemma_generate(proc, model, messages: list, max_new_tokens: int = 512) -> st
 
     input_len = inputs["input_ids"].shape[-1]
 
+    t0 = time.perf_counter()
     with torch.inference_mode():
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
         )
+    elapsed = time.perf_counter() - t0
 
-    return proc.decode(
-        outputs[0][input_len:],
-        skip_special_tokens=True
-    ).strip()
+    output_ids = outputs[0][input_len:]
+    text = proc.decode(output_ids, skip_special_tokens=True).strip()
+    tokens_out = len(output_ids)
+    tps = tokens_out / elapsed if elapsed > 0 else 0
+
+    return {
+        "text": text,
+        "input_tokens": input_len,
+        "output_tokens": tokens_out,
+        "time_s": round(elapsed, 2),
+        "tps": round(tps, 1),
+    }
 
 
-def ocr_image(proc, model, image_input, language_hint: str = "Indonesia") -> str:
-    """OCR + baca teks dari gambar."""
+def ocr_image(proc, model, image_input, language_hint: str = "Indonesia") -> dict:
+    """OCR + baca teks dari gambar. Return dict dengan text + metrics."""
     if isinstance(image_input, str):
         if image_input.startswith("http"):
             import requests
@@ -246,17 +252,17 @@ def ocr_image(proc, model, image_input, language_hint: str = "Indonesia") -> str
                 f"Bahasa dominan: {language_hint}. "
                 f"Pertahankan struktur asli (baris, spasi, tabel). "
                 f"Jika ada angka atau harga, jangan ada yang terlewat. "
-                f"Output hanya teks yang kamu baca, tanpa komentar tambahan."
+                f"Output hanya teks yang terlihat di gambar, tanpa penjelasan atau analisis."
             )}
         ]
     }]
 
-    return gemma_generate(proc, model, messages, max_new_tokens=800)
+    return gemma_generate(proc, model, messages, max_new_tokens=1000)
 
 
 def summarize_text(proc, model, text: str, output_language: str = "Indonesia",
-                   style: str = "ringkas") -> str:
-    """Summarize teks panjang."""
+                   style: str = "ringkas") -> dict:
+    """Summarize teks panjang. Return dict dengan summary + metrics."""
     if style == "ringkas":
         format_instruction = (
             "Format: 3-4 kalimat ringkasan utama, lalu 3-5 poin kunci (bullet), "
@@ -283,8 +289,8 @@ def summarize_text(proc, model, text: str, output_language: str = "Indonesia",
     return gemma_generate(proc, model, messages, max_new_tokens=600)
 
 
-def summarize_transcript(proc, model, transcript: str, context: str = "") -> str:
-    """Summarize hasil transcript audio menjadi notulensi/ringkasan."""
+def summarize_transcript(proc, model, transcript: str, context: str = "") -> dict:
+    """Summarize hasil transcript audio. Return dict dengan summary + metrics."""
     context_str = f"Konteks: {context}\n" if context else ""
 
     messages = [{
@@ -388,14 +394,18 @@ else:
     print("=" * 50)
 
     result = {}
+    metrics = []
 
     # ── Phase 1: Transcript ──
     if AUDIO_PATH:
         print("\n🎙️ [1/2] Transcribing audio...")
         whisper_m, batched = load_whisper()
+        t0 = time.time()
         transcript = transcribe_audio(AUDIO_PATH, language="id")
+        whisper_time = time.time() - t0
         result["transcript"] = transcript["text"]
-        print(f"  ✅ Transcript: {len(transcript['text'])} chars")
+        print(f"  ✅ Transcript: {len(transcript['text'])} chars ({whisper_time:.1f}s)")
+        metrics.append(f"Whisper transcript: {whisper_time:.1f}s | {len(transcript['text'])} chars")
         unload_whisper(whisper_m)
 
     # ── Phase 2: OCR + Summarize ──
@@ -404,17 +414,21 @@ else:
 
     if AUDIO_PATH and result.get("transcript"):
         print("📋 Summarizing...")
-        result["summary"] = summarize_transcript(
+        summary_result = summarize_transcript(
             proc, gemma, result["transcript"], context="rekaman audio"
         )
-        print("  ✅ Summary done")
+        result["summary"] = summary_result["text"]
+        print(f"  ✅ Summary: {summary_result['output_tokens']} tokens | {summary_result['time_s']}s | {summary_result['tps']} tok/s")
+        metrics.append(f"Summarize: {summary_result['time_s']}s | {summary_result['output_tokens']} tokens | {summary_result['tps']} tok/s")
 
     if IMAGE_PATHS:
         result["ocr"] = []
         for img_path in IMAGE_PATHS:
             print(f"📄 OCR: {os.path.basename(img_path)}")
             ocr = ocr_image(proc, gemma, img_path)
-            result["ocr"].append({"file": os.path.basename(img_path), "text": ocr})
+            result["ocr"].append({"file": os.path.basename(img_path), "text": ocr["text"]})
+            print(f"  ✅ OCR: {ocr['output_tokens']} tokens | {ocr['time_s']}s | {ocr['tps']} tok/s")
+            metrics.append(f"OCR {os.path.basename(img_path)}: {ocr['time_s']}s | {ocr['output_tokens']} tokens | {ocr['tps']} tok/s")
 
     unload_gemma(proc, gemma)
 
@@ -434,7 +448,14 @@ else:
     if result.get("ocr"):
         for item in result["ocr"]:
             print(f"\n📄 OCR — {item['file']}:")
-            print(item["text"][:300] + ("..." if len(item["text"]) > 300 else ""))
+            print(item["text"][:500] + ("..." if len(item["text"]) > 500 else ""))
+
+    # ── Metrics ──
+    print("\n" + "=" * 50)
+    print("⏱️  PERFORMANCE METRICS")
+    print("=" * 50)
+    for m in metrics:
+        print(f"  • {m}")
 
     print("\n" + "=" * 50)
     print("✅ Selesai!")
