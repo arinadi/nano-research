@@ -434,17 +434,13 @@ else:
                 chunk_path = f"/tmp/gemma_chunk_{ci}.wav"
                 sf.write(chunk_path, chunk, sr)
 
-                # Kirim audio ke Gemma via chat template
-                import base64
-                with open(chunk_path, "rb") as f:
-                    audio_b64 = base64.b64encode(f.read()).decode()
-
+                # Kirim audio ke Gemma — pakai numpy array langsung
                 messages = [{
                     "role": "user",
                     "content": [
                         {
                             "type": "audio",
-                            "audio": {"data": audio_b64, "format": "wav"},
+                            "audio": chunk,  # numpy array langsung
                         },
                         {
                             "type": "text",
