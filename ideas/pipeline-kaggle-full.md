@@ -39,9 +39,8 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 # ============================================================
 
 !pip install -q faster-whisper accelerate librosa soundfile
-!pip install -q "pillow==11.1.0" --force-reinstall --no-deps
-# NOTE: JANGAN upgrade transformers atau pillow.
-# Previous run corrupt pillow ke 12.x — force reinstall ke 11.x agar torchvision jalan.
+!pip install -q git+https://github.com/huggingface/transformers.git  # butuh versi terbaru untuk Gemma 4
+!pip install -q "pillow==11.1.0" --force-reinstall --no-deps  # fix pillow conflict dengan torchvision
 
 import os, time, torch, gc
 import numpy as np
