@@ -57,21 +57,34 @@ print("=" * 60)
 # ============================================================
 # MODULE 1: FASTER-WHISPER TRANSCRIPT
 # ============================================================
+# NOTE: Whisper dan Gemma TIDAK bisa load bersamaan di T4 (16GB).
+# Strategy: load Whisper → transcribe → unload → load Gemma.
 
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 
-print("\n[1/3] Loading Faster-Whisper large-v3...")
-t0 = time.time()
+def load_whisper():
+    print("\n[1/3] Loading Faster-Whisper large-v3...")
+    t0 = time.time()
+    model = WhisperModel(
+        "large-v3",
+        device="cuda",
+        compute_type="float16",
+        download_root="/kaggle/working/whisper_cache"
+    )
+    batched = BatchedInferencePipeline(model=model)
+    print(f"  ✅ Whisper loaded in {time.time()-t0:.1f}s")
+    return model, batched
 
-whisper_model = WhisperModel(
-    "large-v3",
-    device="cuda",
-    compute_type="float16",
-    download_root="/kaggle/working/whisper_cache"
-)
-batched_whisper = BatchedInferencePipeline(model=whisper_model)
+def unload_whisper(model):
+    """Unload Whisper dari VRAM."""
+    import gc
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("  🧹 Whisper unloaded from VRAM")
 
-print(f"  ✅ Whisper loaded in {time.time()-t0:.1f}s")
+# Load Whisper
+whisper_model, batched_whisper = load_whisper()
 
 
 def transcribe_audio(audio_path: str, language: str = "id") -> dict:
@@ -140,50 +153,57 @@ def transcribe_long_audio(audio_path: str, language: str = "id",
 
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
-print("\n[2/3] Loading Gemma 4 E4B...")
-t0 = time.time()
-
 GEMMA_MODEL_ID = "google/gemma-4-E4B-it"
 
-processor = AutoProcessor.from_pretrained(GEMMA_MODEL_ID)
+def load_gemma():
+    print("\n[2/3] Loading Gemma 4 E4B...")
+    t0 = time.time()
+    proc = AutoProcessor.from_pretrained(GEMMA_MODEL_ID)
+    model = AutoModelForImageTextToText.from_pretrained(
+        GEMMA_MODEL_ID,
+        dtype=torch.bfloat16,
+        device_map="auto",
+    )
+    model.eval()
+    print(f"  ✅ Gemma loaded in {time.time()-t0:.1f}s")
+    print(f"  VRAM: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+    return proc, model
 
-gemma_model = AutoModelForImageTextToText.from_pretrained(
-    GEMMA_MODEL_ID,
-    dtype=torch.bfloat16,   # renamed from torch_dtype
-    device_map="auto",
-)
-gemma_model.eval()
-
-print(f"  ✅ Gemma 4 E4B loaded in {time.time()-t0:.1f}s")
-print(f"  VRAM used: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+def unload_gemma(proc, model):
+    """Unload Gemma dari VRAM."""
+    import gc
+    del model, proc
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("  🧹 Gemma unloaded from VRAM")
 
 
-def gemma_generate(messages: list, max_new_tokens: int = 512) -> str:
+def gemma_generate(proc, model, messages: list, max_new_tokens: int = 512) -> str:
     """Helper untuk generate dari Gemma 4 E4B."""
-    inputs = processor.apply_chat_template(
+    inputs = proc.apply_chat_template(
         messages,
         add_generation_prompt=True,
         tokenize=True,
         return_dict=True,
         return_tensors="pt"
-    ).to(gemma_model.device)
+    ).to(model.device)
 
     input_len = inputs["input_ids"].shape[-1]
 
     with torch.inference_mode():
-        outputs = gemma_model.generate(
+        outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
         )
 
-    return processor.decode(
+    return proc.decode(
         outputs[0][input_len:],
         skip_special_tokens=True
     ).strip()
 
 
-def ocr_image(image_input, language_hint: str = "Indonesia") -> str:
+def ocr_image(proc, model, image_input, language_hint: str = "Indonesia") -> str:
     """OCR + baca teks dari gambar."""
     if isinstance(image_input, str):
         if image_input.startswith("http"):
@@ -210,10 +230,10 @@ def ocr_image(image_input, language_hint: str = "Indonesia") -> str:
         ]
     }]
 
-    return gemma_generate(messages, max_new_tokens=800)
+    return gemma_generate(proc, model, messages, max_new_tokens=800)
 
 
-def summarize_text(text: str, output_language: str = "Indonesia",
+def summarize_text(proc, model, text: str, output_language: str = "Indonesia",
                    style: str = "ringkas") -> str:
     """Summarize teks panjang."""
     if style == "ringkas":
@@ -239,10 +259,10 @@ def summarize_text(text: str, output_language: str = "Indonesia",
         }]
     }]
 
-    return gemma_generate(messages, max_new_tokens=600)
+    return gemma_generate(proc, model, messages, max_new_tokens=600)
 
 
-def summarize_transcript(transcript: str, context: str = "") -> str:
+def summarize_transcript(proc, model, transcript: str, context: str = "") -> str:
     """Summarize hasil transcript audio menjadi notulensi/ringkasan."""
     context_str = f"Konteks: {context}\n" if context else ""
 
@@ -261,16 +281,17 @@ def summarize_transcript(transcript: str, context: str = "") -> str:
         }]
     }]
 
-    return gemma_generate(messages, max_new_tokens=800)
+    return gemma_generate(proc, model, messages, max_new_tokens=800)
 
 
 # ============================================================
-# MODULE 3: FULL PIPELINE
+# MODULE 3: FULL PIPELINE (Sequential Loading)
 # ============================================================
+# Whisper dan Gemma load bergantian — tidak muat di VRAM bersamaan.
 
 def full_pipeline(audio_path: str, image_paths: list = None) -> dict:
     """
-    Pipeline lengkap: transcript → summarize, OCR → summarize.
+    Pipeline: Whisper (transcribe) → unload → Gemma (OCR + summarize).
 
     Args:
         audio_path: Path ke file audio
@@ -281,38 +302,61 @@ def full_pipeline(audio_path: str, image_paths: list = None) -> dict:
     """
     output = {}
 
-    # Step 1: Transcript
-    print("🎙️ Transcribing audio...")
+    # ── Phase 1: Transcript (Whisper) ──
+    print("🎙️ [Phase 1] Transcribing with Whisper...")
     transcript = transcribe_audio(audio_path, language="id")
     output["transcript"] = transcript["text"]
+    print(f"  ✅ Transcript: {len(transcript['text'])} chars")
 
-    # Step 2: Summarize transcript
+    # Unload Whisper, free VRAM
+    unload_whisper(whisper_model)
+
+    # ── Phase 2: OCR + Summarize (Gemma) ──
+    print("\n🤖 [Phase 2] Loading Gemma 4 E4B...")
+    proc, gemma = load_gemma()
+
     print("📋 Summarizing transcript...")
     output["summary"] = summarize_transcript(
-        transcript["text"],
-        context="rekaman audio"
+        proc, gemma, transcript["text"], context="rekaman audio"
     )
+    print(f"  ✅ Summary done")
 
-    # Step 3: OCR gambar (jika ada)
     if image_paths:
         output["ocr_results"] = []
         for img_path in image_paths:
             print(f"📄 OCR: {img_path}")
-            ocr = ocr_image(img_path)
+            ocr = ocr_image(proc, gemma, img_path)
             output["ocr_results"].append(ocr)
+
+    # Unload Gemma
+    unload_gemma(proc, gemma)
 
     return output
 
 
 # ============================================================
-# TEST
+# TEST — Sequential: Whisper dulu, lalu Gemma
 # ============================================================
 
-print("\n[3/3] Running pipeline tests...")
+print("\n[3/3] Running pipeline tests (sequential)...")
 print("-" * 40)
 
-# --- TEST A: OCR ---
-print("\n📄 TEST A: OCR dari gambar teks")
+# --- TEST A: Whisper Transcript ---
+print("\n🎙️ TEST A: Whisper Transcript")
+# (Skip jika tidak ada file audio — uncomment untuk test)
+# result = transcribe_audio("/kaggle/input/your-audio/recording.mp3", language="id")
+# print(f"  Hasil: {result['text'][:200]}...")
+print("  (Skip — tidak ada file audio untuk test)")
+
+# Unload Whisper
+unload_whisper(whisper_model)
+
+# --- Load Gemma ---
+print("\n🤖 Loading Gemma 4 E4B...")
+proc, gemma = load_gemma()
+
+# --- TEST B: OCR ---
+print("\n📄 TEST B: OCR dari gambar teks")
 
 from PIL import ImageDraw
 test_img = Image.new("RGB", (500, 250), color=(248, 245, 235))
@@ -333,12 +377,12 @@ for line in lines:
     y += 28
 
 t0 = time.time()
-ocr_result = ocr_image(test_img, language_hint="Indonesia")
+ocr_result = ocr_image(proc, gemma, test_img, language_hint="Indonesia")
 print(f"  Hasil OCR ({time.time()-t0:.1f}s):")
 print(f"  {ocr_result}")
 
-# --- TEST B: Summarization ---
-print("\n📋 TEST B: Summarization teks panjang")
+# --- TEST C: Summarization ---
+print("\n📋 TEST C: Summarization teks panjang")
 
 sample_text = """
 Transformasi digital di sektor kesehatan Indonesia mengalami percepatan signifikan
@@ -347,32 +391,16 @@ rekam medis elektronik dari lebih dari 3.000 fasilitas kesehatan.
 """
 
 t0 = time.time()
-summary_result = summarize_text(sample_text, output_language="Indonesia", style="ringkas")
+summary_result = summarize_text(proc, gemma, sample_text, output_language="Indonesia", style="ringkas")
 print(f"  Hasil Summary ({time.time()-t0:.1f}s):")
 print(f"  {summary_result}")
 
 # --- CLEANUP ---
-print("\n🧹 Membersihkan memory GPU...")
-torch.cuda.empty_cache()
-gc.collect()
-print(f"  VRAM setelah cleanup: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+unload_gemma(proc, gemma)
 
 print("\n" + "=" * 60)
 print("✅ Semua test selesai!")
 print("=" * 60)
-```
-
-## Async untuk Batch Processing
-
-```python
-from concurrent.futures import ThreadPoolExecutor
-
-def process_batch(audio_files: list) -> list:
-    results = []
-    for f in audio_files:
-        r = transcribe_audio(f, language="id")
-        results.append(r)
-    return results
 ```
 
 ---
