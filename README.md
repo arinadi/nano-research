@@ -1,26 +1,38 @@
 # 🔬 Nano Research
 
-Repositori kecil untuk **validasi ide-ide yang berdatangan**.
+> **Atomic Ideas, Scalable Products.**
+> *Menjembatani pemikiran fundamental (Atomic) dengan eksekusi rekayasa yang terukur (Scalable).*
 
-Ketika sebuah ide muncul — entah dari obrolan, bacaan, atau sekadar *sudden insight* — tempat ini jadi tempat inkubasi sebelum layak dikembangkan lebih serius.
+Repositori kecil untuk **validasi ide-ide atomik** yang berdatangan — tempat ide-ide kecil diuji sebelum tumbuh menjadi produk yang scalable.
 
 ## Tujuan
 
-- **Rapid validation**: Uji ide secara cepat sebelum investasi waktu & resources besar.
-- **Capture ideas**: Tempat menampung ide-ide yang datang silih berganti.
-- **Kill or commit**: Putuskan apakah sebuah ide layak dilanjutkan atau cukup sekedar direkam.
+- **Atomic capture**: Tangkap ide dalam bentuk paling murninya.
+- **Rapid validation**: Uji ide secara cepat sebelum investasi waktu & resources.
+- **Kill or scale**: Putuskan — matikan atau kembangkan ke produk.
 
-## Bagaimana Cara Kerjanya
+## Struktur
 
-1. Ide datang → buat branch / file baru di sini.
-2. Eksplorasi kasar: prototyping, riset literatur, atau sekadar curhat di README.
-3. Hasilnya? **Valid** → lanjut. **Tidak valid** → document why & move on.
+```
+nano-research/
+├── ideas/          # Ide-ide aktif yang sedang dieksplorasi
+├── experiments/    # Prototyping kasar & proof of concept
+├── archive/        # Ide yang sudah dikubur (dengan alasan)
+└── templates/      # Template untuk ide baru
+```
+
+## Workflow
+
+1. Ide datang → buat file di `ideas/` dari template.
+2. Eksplorasi → prototype di `experiments/` jika perlu.
+3. Hasil?
+   - ✅ **Valid** → promote ke repo terpisah untuk development serius.
+   - ❌ **Invalid** → pindah ke `archive/` dengan dokumentasi *why*.
 
 ## Prinsip
 
-> *Keep it small, keep it fast.*
-> Research ini bukan tentang sempurna — ini tentang **cepat tahu**.
+> *Atomic ideas start here. Scalable products start after validation.*
 
 ---
 
-*Created for fast-moving ideas that need a home.*
+Bagian dari ekosistem [arinano.work](https://arinano.work) — *Menjembatani pemikiran fundamental dengan eksekusi rekayasa yang terukur.*
