@@ -413,6 +413,64 @@ else:
     proc, gemma = load_gemma()
 
     if AUDIO_PATH and result.get("transcript"):
+        # ── Bonus: Gemma Transcript Test (per 30s chunk) ──
+        print("\n🎙️ [Bonus] Testing Gemma transcript (per 30s chunk)...")
+        try:
+            import librosa
+            import soundfile as sf
+
+            audio, sr = librosa.load(AUDIO_PATH, sr=16000, mono=True)
+            duration = len(audio) / sr
+            chunk_sec = 30
+            chunk_samples = chunk_sec * sr
+            chunks = [audio[i:i+chunk_samples] for i in range(0, len(audio), chunk_samples)]
+
+            print(f"  📊 Audio: {duration:.1f}s → {len(chunks)} chunk(s) à {chunk_sec}s")
+
+            gemma_transcript_parts = []
+            for ci, chunk in enumerate(chunks):
+                chunk_path = f"/tmp/gemma_chunk_{ci}.wav"
+                sf.write(chunk_path, chunk, sr)
+
+                # Kirim audio ke Gemma via chat template
+                import base64
+                with open(chunk_path, "rb") as f:
+                    audio_b64 = base64.b64encode(f.read()).decode()
+
+                messages = [{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "audio",
+                            "audio": {"data": audio_b64, "format": "wav"},
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "Transkrip audio ini secara lengkap dan akurat dalam Bahasa Indonesia. "
+                                "Output hanya teks transkrip, tanpa komentar."
+                            )
+                        }
+                    ]
+                }]
+
+                print(f"  🎙️ Chunk {ci+1}/{len(chunks)}...", end=" ", flush=True)
+                chunk_result = gemma_generate(proc, gemma, messages, max_new_tokens=800)
+                gemma_transcript_parts.append(chunk_result["text"])
+                print(f"✅ {chunk_result['output_tokens']} tokens | {chunk_result['time_s']}s | {chunk_result['tps']} tok/s")
+
+                os.remove(chunk_path)
+
+            gemma_full_transcript = " ".join(gemma_transcript_parts)
+            result["gemma_transcript"] = gemma_full_transcript
+            print(f"  ✅ Gemma transcript total: {len(gemma_full_transcript)} chars")
+
+            # Simpan metrics
+            metrics.append(f"Gemma transcript ({len(chunks)} chunks): {len(gemma_full_transcript)} chars")
+
+        except Exception as e:
+            print(f"  ⚠️ Gemma transcript error: {e}")
+
         print("📋 Summarizing...")
         summary_result = summarize_transcript(
             proc, gemma, result["transcript"], context="rekaman audio"
@@ -450,8 +508,12 @@ else:
     print("=" * 50)
 
     if result.get("transcript"):
-        print(f"\n🎙️ TRANSCRIPT:")
+        print(f"\n🎙️ TRANSCRIPT (Whisper):")
         print(result["transcript"][:500] + ("..." if len(result["transcript"]) > 500 else ""))
+
+    if result.get("gemma_transcript"):
+        print(f"\n🎙️ TRANSCRIPT (Gemma 4 E4B):")
+        print(result["gemma_transcript"][:500] + ("..." if len(result["gemma_transcript"]) > 500 else ""))
 
     if result.get("summary"):
         print(f"\n📋 RINGKASAN:")
