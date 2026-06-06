@@ -425,6 +425,18 @@ else:
         result["ocr"] = []
         for img_path in IMAGE_PATHS:
             print(f"📄 OCR: {os.path.basename(img_path)}")
+
+            # Tampilkan foto asli
+            try:
+                from IPython.display import display as ipy_display
+                img_preview = Image.open(img_path)
+                # Resize jika terlalu besar
+                if max(img_preview.size) > 600:
+                    img_preview.thumbnail((600, 600), Image.LANCZOS)
+                ipy_display(img_preview)
+            except Exception:
+                pass
+
             ocr = ocr_image(proc, gemma, img_path)
             result["ocr"].append({"file": os.path.basename(img_path), "text": ocr["text"]})
             print(f"  ✅ OCR: {ocr['output_tokens']} tokens | {ocr['time_s']}s | {ocr['tps']} tok/s")
