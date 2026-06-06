@@ -300,30 +300,86 @@ def summarize_transcript(proc, model, transcript: str, context: str = "") -> str
 
 
 # ============================================================
-# MODULE 2.5: JALANKAN PIPELINE
+# MODULE 2.5: AUTO-DETECT & JALANKAN PIPELINE
 # ============================================================
-# Isi path file di bawah, lalu run cell ini.
+# Upload file ke Kaggle (drag & drop), lalu run cell ini.
+# Script akan auto-detect audio & foto di /kaggle/input/
 
-# ── ISI PATH FILE DI SINI ──
-AUDIO_PATH = ""          # contoh: "/kaggle/input/recording.mp3"
-IMAGE_PATHS = []         # contoh: ["/kaggle/input/nota1.jpg", "/kaggle/input/nota2.png"]
-# ────────────────────────────
+AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".wma"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".bmp"}
+
+def scan_kaggle_input():
+    """Scan /kaggle/input/ untuk audio dan gambar."""
+    input_dir = "/kaggle/input"
+    audio_files = []
+    image_files = []
+
+    if not os.path.exists(input_dir):
+        return audio_files, image_files
+
+    for root, dirs, files_list in os.walk(input_dir):
+        for f in files_list:
+            ext = os.path.splitext(f)[1].lower()
+            full_path = os.path.join(root, f)
+            if ext in AUDIO_EXTS:
+                audio_files.append(full_path)
+            elif ext in IMAGE_EXTS:
+                image_files.append(full_path)
+
+    return audio_files, image_files
+
+# ── Scan ──
+print("=" * 50)
+print("🔍 SCANNING /kaggle/input/...")
+print("=" * 50)
+
+audio_files, image_files = scan_kaggle_input()
+
+# ── Tampilkan hasil scan ──
+print(f"\n🎙️ Audio ditemukan: {len(audio_files)}")
+for i, f in enumerate(audio_files):
+    size = os.path.getsize(f) / 1e6
+    print(f"  [{i}] {os.path.basename(f)} ({size:.1f} MB)  ← {f}")
+
+print(f"\n📷 Foto ditemukan: {len(image_files)}")
+for i, f in enumerate(image_files):
+    size = os.path.getsize(f) / 1e6
+    print(f"  [{i}] {os.path.basename(f)} ({size:.1f} MB)  ← {f}")
 
 print("=" * 50)
-print("📊 INPUT")
-print("=" * 50)
-print(f"  Audio: {AUDIO_PATH if AUDIO_PATH else '❌ tidak ada'}")
-print(f"  Foto:  {len(IMAGE_PATHS)} file")
-if IMAGE_PATHS:
-    for p in IMAGE_PATHS:
-        print(f"    - {p}")
-print("=" * 50)
 
-if not AUDIO_PATH and not IMAGE_PATHS:
-    print("\n⚠️ Isi AUDIO_PATH atau IMAGE_PATHS dulu, lalu run cell ini lagi.")
+# ── Pilih file ──
+if not audio_files and not image_files:
+    print("\n⚠️ Tidak ada file ditemukan di /kaggle/input/")
+    print("   Upload file via Kaggle UI (drag & drop), lalu run cell ini lagi.")
 else:
-    print("\n🚀 Menjalankan pipeline...")
-    print("-" * 50)
+    # Pilih audio
+    AUDIO_PATH = ""
+    if audio_files:
+        if len(audio_files) == 1:
+            AUDIO_PATH = audio_files[0]
+            print(f"\n🎙️ Auto-pilih audio: {os.path.basename(AUDIO_PATH)}")
+        else:
+            idx = input(f"\nPilih audio (0-{len(audio_files)-1}, atau Enter untuk skip): ").strip()
+            if idx.isdigit() and 0 <= int(idx) < len(audio_files):
+                AUDIO_PATH = audio_files[int(idx)]
+
+    # Pilih foto
+    IMAGE_PATHS = []
+    if image_files:
+        if len(image_files) == 1:
+            IMAGE_PATHS = image_files
+            print(f"📷 Auto-pilih foto: {os.path.basename(image_files[0])}")
+        else:
+            idx = input(f"Pilih foto (0-{len(image_files)-1}, atau Enter untuk semua): ").strip()
+            if idx.isdigit() and 0 <= int(idx) < len(image_files):
+                IMAGE_PATHS = [image_files[int(idx)]]
+            elif not idx:
+                IMAGE_PATHS = image_files  # semua
+
+    print("\n" + "=" * 50)
+    print("🚀 MENJALANKAN PIPELINE")
+    print("=" * 50)
 
     result = {}
 
