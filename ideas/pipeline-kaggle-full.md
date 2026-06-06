@@ -39,8 +39,9 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 # ============================================================
 
 !pip install -q faster-whisper accelerate librosa soundfile
-# NOTE: JANGAN upgrade transformers atau pillow — Kaggle sudah punya versi compat.
-# transformers 5.x butuh pillow>=12, tapi torchvision butuh pillow<12. Konflik!
+!pip install -q "pillow==11.1.0" --force-reinstall --no-deps
+# NOTE: JANGAN upgrade transformers atau pillow.
+# Previous run corrupt pillow ke 12.x — force reinstall ke 11.x agar torchvision jalan.
 
 import os, time, torch, gc
 import numpy as np
