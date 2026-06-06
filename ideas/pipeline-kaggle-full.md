@@ -149,7 +149,7 @@ processor = AutoProcessor.from_pretrained(GEMMA_MODEL_ID)
 
 gemma_model = AutoModelForImageTextToText.from_pretrained(
     GEMMA_MODEL_ID,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,   # renamed from torch_dtype
     device_map="auto",
 )
 gemma_model.eval()
@@ -166,7 +166,7 @@ def gemma_generate(messages: list, max_new_tokens: int = 512) -> str:
         tokenize=True,
         return_dict=True,
         return_tensors="pt"
-    ).to(gemma_model.device, dtype=torch.bfloat16)
+    ).to(gemma_model.device)
 
     input_len = inputs["input_ids"].shape[-1]
 
