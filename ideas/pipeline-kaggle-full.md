@@ -38,7 +38,8 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 # Target: Kaggle Free GPU (T4 16GB)
 # ============================================================
 
-!pip install -q --upgrade faster-whisper "transformers>=5.10.1" accelerate "pillow<12.0" librosa soundfile
+!pip install -q --upgrade faster-whisper "transformers>=5.10.1" accelerate librosa soundfile
+!pip install -q --force-reinstall "pillow==11.2.1"  # pin versi agar compat dengan torchvision
 
 import os, time, torch, gc
 import numpy as np
