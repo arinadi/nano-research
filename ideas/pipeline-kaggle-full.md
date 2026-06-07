@@ -168,22 +168,26 @@ def start_vllm_server():
     print("\n[2/3] Starting vLLM + MTP server...")
     t0 = time.time()
 
-    # Unload Whisper dulu, free VRAM
+    # Pastikan VRAM bersih
     gc.collect()
     torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    free, total = torch.cuda.mem_get_info(0)
+    print(f"  📊 GPU 0 free: {free/1e9:.1f}GB / {total/1e9:.1f}GB total")
 
     cmd = [
         "python", "-m", "vllm.entrypoints.openai.api_server",
         "--model", VLLM_MODEL,
         "--dtype", "half",
         "--max-model-len", "32768",
-        "--gpu-memory-utilization", "0.90",
+        "--gpu-memory-utilization", "0.85",
         "--limit-mm-per-prompt", '{"image": 4, "audio": 1}',
         "--spec-method", "mtp",
         "--spec-model", VLLM_DRAFTER,
         "--spec-tokens", "1",
         "--host", "0.0.0.0",
         "--port", str(VLLM_PORT),
+        "--enforce-eager",
     ]
 
     # Jalankan vLLM server di background
