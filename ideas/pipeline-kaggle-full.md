@@ -64,31 +64,48 @@ print("=" * 60)
 # MODULE 1: FASTER-WHISPER TRANSCRIPT
 # ============================================================
 
-from faster_whisper import WhisperModel, BatchedInferencePipeline
+import subprocess as _sp
+import json as _json
 
-def load_whisper():
-    print("\n[1/3] Loading Faster-Whisper large-v3...")
+def transcribe_audio(audio_path: str, language: str = "id") -> dict:
+    """
+    Transcript audio via Whisper di subprocess terpisah.
+    VRAM benar-benar dibebaskan oleh OS setelah selesai.
+    """
+    print(f"  🎙️ Whisper subprocess: {os.path.basename(audio_path)}")
     t0 = time.time()
-    model = WhisperModel(
-        "large-v3",
-        device="cuda",
-        compute_type="float16",
-        download_root="/kaggle/working/whisper_cache"
+
+    script = f'''
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+from faster_whisper import WhisperModel
+
+model = WhisperModel("large-v3", device="cuda", compute_type="float16",
+                     download_root="/kaggle/working/whisper_cache")
+segments, info = model.transcribe(
+    "{audio_path.replace(chr(92), "/")}",
+    language={"None" if not language else repr(language)},
+    beam_size=5, vad_filter=True,
+    vad_parameters=dict(min_silence_duration_ms=500),
+)
+result = {{"text": " ".join(s.text.strip() for s in segments),
+           "language": info.language, "duration": info.duration}}
+print(json.dumps(result))
+'''
+
+    proc = _sp.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, timeout=300,
     )
-    batched = BatchedInferencePipeline(model=model)
-    print(f"  ✅ Whisper loaded in {time.time()-t0:.1f}s")
-    return model, batched
+    elapsed = time.time() - t0
 
-def unload_whisper(model):
-    """Unload Whisper dari VRAM."""
-    import gc
-    del model
-    gc.collect()
-    torch.cuda.empty_cache()
-    print("  🧹 Whisper unloaded from VRAM")
+    if proc.returncode != 0:
+        raise RuntimeError(f"Whisper failed:\n{proc.stderr[-500:]}")
 
-# Load Whisper
-whisper_model, batched_whisper = load_whisper()
+    last_line = proc.stdout.strip().split("\n")[-1]
+    result = _json.loads(last_line)
+    print(f"  ✅ Transcript: {len(result['text'])} chars ({elapsed:.1f}s)")
+    return result
 
 
 def transcribe_audio(audio_path: str, language: str = "id") -> dict:
@@ -163,16 +180,25 @@ VLLM_PORT = 8000
 VLLM_MODEL = "google/gemma-4-E4B-it"
 VLLM_DRAFTER = "google/gemma-4-E4B-it-assistant"
 
+def aggressive_vram_free():
+    """Kembalikan memori GPU ke OS, bukan hanya ke PyTorch cache."""
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    torch.cuda.memory.set_per_process_memory_fraction(0.0)
+    torch.cuda.empty_cache()
+    torch.cuda.memory.set_per_process_memory_fraction(1.0)
+    free, total = torch.cuda.mem_get_info(0)
+    print(f"  📊 VRAM setelah free: {free/1e9:.1f}GB free / {total/1e9:.1f}GB total")
+
+
 def start_vllm_server():
     """Start vLLM server dengan MTP drafter di background."""
     print("\n[2/3] Starting vLLM + MTP server...")
     t0 = time.time()
 
     # Aggressively free VRAM
-    for _ in range(3):
-        gc.collect()
-        torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+    aggressive_vram_free()
 
     # Cari GPU dengan VRAM paling banyak
     best_gpu = 0
@@ -194,11 +220,11 @@ def start_vllm_server():
         "--model", VLLM_MODEL,
         "--dtype", "half",
         "--max-model-len", "16384",
-        "--gpu-memory-utilization", "0.80",
+        "--gpu-memory-utilization", "0.92",
         "--limit-mm-per-prompt", '{"image": 2, "audio": 1}',
         "--spec-method", "mtp",
         "--spec-model", VLLM_DRAFTER,
-        "--spec-tokens", "1",
+        "--spec-tokens", "3",
         "--host", "0.0.0.0",
         "--port", str(VLLM_PORT),
         "--enforce-eager",
@@ -485,17 +511,12 @@ else:
     result = {}
     metrics = []
 
-    # ── Phase 1: Transcript ──
+    # ── Phase 1: Transcript (via subprocess — VRAM bebas setelah selesai) ──
     if AUDIO_PATH:
-        print("\n🎙️ [1/2] Transcribing audio...")
-        whisper_m, batched = load_whisper()
-        t0 = time.time()
+        print("\n🎙️ [1/2] Transcribing audio (subprocess)...")
         transcript = transcribe_audio(AUDIO_PATH, language="id")
-        whisper_time = time.time() - t0
         result["transcript"] = transcript["text"]
-        print(f"  ✅ Transcript: {len(transcript['text'])} chars ({whisper_time:.1f}s)")
-        metrics.append(f"Whisper transcript: {whisper_time:.1f}s | {len(transcript['text'])} chars")
-        unload_whisper(whisper_m)
+        metrics.append(f"Whisper transcript: {len(transcript['text'])} chars")
 
     # ── Phase 2: Start vLLM + MTP Server ──
     print("\n🤖 [2/2] Starting vLLM + MTP server...")
