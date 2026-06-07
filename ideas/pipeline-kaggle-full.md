@@ -179,8 +179,8 @@ def start_vllm_server():
         "--max-model-len", "32768",
         "--gpu-memory-utilization", "0.90",
         "--limit-mm-per-prompt", '{"image": 4, "audio": 1}',
-        "--speculative-model", VLLM_DRAFTER,
-        "--speculative-model-uses-vllm-mtp-path",
+        "--spec-method", "gemma4_mtp",
+        "--spec-model", VLLM_DRAFTER,
         "--host", "0.0.0.0",
         "--port", str(VLLM_PORT),
     ]
