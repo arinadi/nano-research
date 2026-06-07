@@ -22,13 +22,13 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 
 | Component | VRAM |
 |---|---|
-| vLLM Gemma 4 E4B + MTP (BF16, 90% util) | ~14 GB |
+| vLLM Gemma 4 E4B + MTP (FP16, 80% util) | ~11.6 GB |
 | OS + overhead | ~1.5 GB |
-| **Total** | **~15.5 GB** (1 GPU) |
+| **Total** | **~13 GB** (1 GPU, 14.56 GB available) |
 
 > **Note:** Whisper di-load SEBELUM vLLM start, lalu di-unload.
-> vLLM ambil hampir seluruh VRAM untuk KV cache + model.
-> Estimasi throughput: **~25–35 tok/s** (vs ~6 tok/s HF Transformers).
+> T4 tidak support bfloat16 → pakai float16 (`--dtype half`).
+> Estimasi throughput: **~15–25 tok/s** (vs ~6 tok/s HF Transformers).
 
 ---
 
@@ -168,20 +168,24 @@ def start_vllm_server():
     print("\n[2/3] Starting vLLM + MTP server...")
     t0 = time.time()
 
-    # Pastikan VRAM bersih
-    gc.collect()
-    torch.cuda.empty_cache()
+    # Aggressively free VRAM
+    for _ in range(3):
+        gc.collect()
+        torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     free, total = torch.cuda.mem_get_info(0)
     print(f"  📊 GPU 0 free: {free/1e9:.1f}GB / {total/1e9:.1f}GB total")
+
+    if free < 8e9:
+        print(f"  ⚠️ VRAM tidak cukup ({free/1e9:.1f}GB free). Turunkan gpu-memory-utilization.")
 
     cmd = [
         "python", "-m", "vllm.entrypoints.openai.api_server",
         "--model", VLLM_MODEL,
         "--dtype", "half",
-        "--max-model-len", "32768",
-        "--gpu-memory-utilization", "0.85",
-        "--limit-mm-per-prompt", '{"image": 4, "audio": 1}',
+        "--max-model-len", "16384",
+        "--gpu-memory-utilization", "0.80",
+        "--limit-mm-per-prompt", '{"image": 2, "audio": 1}',
         "--spec-method", "mtp",
         "--spec-model", VLLM_DRAFTER,
         "--spec-tokens", "1",
