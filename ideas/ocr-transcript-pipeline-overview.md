@@ -23,7 +23,8 @@
 | [[gemma4-model-selection]] | Kenapa E4B untuk Kaggle Free, VRAM comparison, kemampuan & batasan |
 | [[gemini-api-providers]] | Masalah RTO, perbandingan Cloudflare/DeepInfra/Google, benchmark code |
 | [[faster-whisper-update]] | Update large-v3, turbo, WhisperX, fitur baru engine |
-| [[pipeline-kaggle-full]] | Script Python lengkap: Whisper + Gemma 4 E4B di Kaggle |
+| [[pipeline-kaggle-full]] | Script Python lengkap: Whisper + Gemma 4 E4B + MTP di Kaggle |
+| [[gemma4-e4b-inference-optimization]] | Backend comparison (HF/MTP/vLLM/llama.cpp), code samples |
 | [[mimo-v25-evaluation]] | Apakah MiMo V2.5 cocok untuk pipeline ini (OCR, summary, color) |
 
 ---

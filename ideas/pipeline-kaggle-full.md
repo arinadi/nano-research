@@ -23,12 +23,13 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 | Component | VRAM |
 |---|---|
 | Faster-Whisper large-v3 (FP16) | ~3 GB |
-| Gemma 4 E4B (bfloat16, split 2 GPU) | ~8 GB |
+| Gemma 4 E4B (bfloat16, 1 GPU) | ~8 GB |
+| MTP Drafter (~277 MB) | ~0.3 GB |
 | OS + overhead | ~2 GB |
-| **Total** | **~13 GB** (split ke 2× T4 16GB) |
+| **Total** | **~13 GB** (1 GPU, sequential) |
 
 > **Note:** Sequential loading — Whisper dan Gemma load bergantian.
-> Gemma di-split ke 2 GPU via `device_map="auto"`.
+> MTP drafter memberikan ~2× speedup tanpa tambahan VRAM signifikan.
 
 ---
 
@@ -162,8 +163,10 @@ from transformers import AutoProcessor, AutoModelForImageTextToText
 
 GEMMA_MODEL_ID = "google/gemma-4-E4B-it"
 
+GEMMA_DRAFT_ID = "google/gemma-4-E4B-it-assistant"  # MTP drafter (~277 MB)
+
 def load_gemma():
-    print("\n[2/3] Loading Gemma 4 E4B (full bfloat16, split 2 GPU)...")
+    print("\n[2/3] Loading Gemma 4 E4B + MTP drafter...")
     t0 = time.time()
     proc = AutoProcessor.from_pretrained(GEMMA_MODEL_ID, trust_remote_code=True)
 
@@ -172,30 +175,42 @@ def load_gemma():
         free, total = torch.cuda.mem_get_info(i)
         print(f"  📊 GPU {i}: {free/1e9:.1f}GB free / {total/1e9:.1f}GB total")
 
+    # Target model — satu GPU saja, hindari tensor parallel overhead
     model = AutoModelForImageTextToText.from_pretrained(
         GEMMA_MODEL_ID,
         dtype=torch.bfloat16,
-        device_map="auto",   # split ke 2 GPU otomatis
+        device_map="cuda:0",
         trust_remote_code=True,
         low_cpu_mem_usage=True,
     )
     model.eval()
-    print(f"  ✅ Gemma loaded in {time.time()-t0:.1f}s")
-    for i in range(torch.cuda.device_count()):
-        used = torch.cuda.memory_allocated(i) / 1e9
-        print(f"  📊 GPU {i} VRAM used: {used:.2f} GB")
-    return proc, model
 
-def unload_gemma(proc, model):
-    """Unload Gemma dari VRAM."""
+    # MTP drafter — prediksi beberapa token sekaligus, kualitas identik
+    drafter = AutoModelForImageTextToText.from_pretrained(
+        GEMMA_DRAFT_ID,
+        dtype=torch.bfloat16,
+        device_map="cuda:0",
+        trust_remote_code=True,
+    )
+    drafter.eval()
+
+    print(f"  ✅ Gemma + MTP loaded in {time.time()-t0:.1f}s")
+    used = torch.cuda.memory_allocated(0) / 1e9
+    print(f"  📊 GPU 0 VRAM used: {used:.2f} GB")
+    return proc, model, drafter
+
+def unload_gemma(proc, model, drafter=None):
+    """Unload Gemma + drafter dari VRAM."""
     import gc
+    if drafter is not None:
+        del drafter
     del model, proc
     gc.collect()
     torch.cuda.empty_cache()
-    print("  🧹 Gemma unloaded from VRAM")
+    print("  🧹 Gemma + MTP unloaded from VRAM")
 
 
-def gemma_generate(proc, model, messages: list, max_new_tokens: int = 512) -> dict:
+def gemma_generate(proc, model, messages: list, max_new_tokens: int = 512, drafter=None) -> dict:
     """Helper untuk generate dari Gemma 4 E4B. Return dict dengan text + metrics."""
     inputs = proc.apply_chat_template(
         messages,
@@ -203,17 +218,21 @@ def gemma_generate(proc, model, messages: list, max_new_tokens: int = 512) -> di
         tokenize=True,
         return_dict=True,
         return_tensors="pt"
-    ).to(model.device)
+    ).to("cuda:0")
 
     input_len = inputs["input_ids"].shape[-1]
 
+    gen_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": False,
+    }
+    # MTP drafter untuk speculative decoding (~2× lebih cepat)
+    if drafter is not None:
+        gen_kwargs["assistant_model"] = drafter
+
     t0 = time.perf_counter()
     with torch.inference_mode():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-        )
+        outputs = model.generate(**inputs, **gen_kwargs)
     elapsed = time.perf_counter() - t0
 
     output_ids = outputs[0][input_len:]
@@ -230,7 +249,7 @@ def gemma_generate(proc, model, messages: list, max_new_tokens: int = 512) -> di
     }
 
 
-def ocr_image(proc, model, image_input, language_hint: str = "Indonesia") -> dict:
+def ocr_image(proc, model, image_input, language_hint: str = "Indonesia", drafter=None) -> dict:
     """OCR + baca teks dari gambar. Return dict dengan text + metrics."""
     if isinstance(image_input, str):
         if image_input.startswith("http"):
@@ -257,11 +276,11 @@ def ocr_image(proc, model, image_input, language_hint: str = "Indonesia") -> dic
         ]
     }]
 
-    return gemma_generate(proc, model, messages, max_new_tokens=1000)
+    return gemma_generate(proc, model, messages, max_new_tokens=1000, drafter=drafter)
 
 
 def summarize_text(proc, model, text: str, output_language: str = "Indonesia",
-                   style: str = "ringkas") -> dict:
+                   style: str = "ringkas", drafter=None) -> dict:
     """Summarize teks panjang. Return dict dengan summary + metrics."""
     if style == "ringkas":
         format_instruction = (
@@ -286,10 +305,10 @@ def summarize_text(proc, model, text: str, output_language: str = "Indonesia",
         }]
     }]
 
-    return gemma_generate(proc, model, messages, max_new_tokens=600)
+    return gemma_generate(proc, model, messages, max_new_tokens=600, drafter=drafter)
 
 
-def summarize_transcript(proc, model, transcript: str, context: str = "") -> dict:
+def summarize_transcript(proc, model, transcript: str, context: str = "", drafter=None) -> dict:
     """Summarize hasil transcript audio. Return dict dengan summary + metrics."""
     context_str = f"Konteks: {context}\n" if context else ""
 
@@ -308,7 +327,7 @@ def summarize_transcript(proc, model, transcript: str, context: str = "") -> dic
         }]
     }]
 
-    return gemma_generate(proc, model, messages, max_new_tokens=800)
+    return gemma_generate(proc, model, messages, max_new_tokens=800, drafter=drafter)
 
 
 # ============================================================
@@ -409,8 +428,8 @@ else:
         unload_whisper(whisper_m)
 
     # ── Phase 2: OCR + Summarize ──
-    print("\n🤖 [2/2] Loading Gemma 4 E4B...")
-    proc, gemma = load_gemma()
+    print("\n🤖 [2/2] Loading Gemma 4 E4B + MTP drafter...")
+    proc, gemma, drafter = load_gemma()
 
     if AUDIO_PATH and result.get("transcript"):
         # ── Bonus: Gemma Transcript Test (per 30s chunk) ──
@@ -453,7 +472,7 @@ else:
                 }]
 
                 print(f"  🎙️ Chunk {ci+1}/{len(chunks)}...", end=" ", flush=True)
-                chunk_result = gemma_generate(proc, gemma, messages, max_new_tokens=800)
+                chunk_result = gemma_generate(proc, gemma, messages, max_new_tokens=800, drafter=drafter)
                 gemma_transcript_parts.append(chunk_result["text"])
                 gemma_transcript_total_time += chunk_result["time_s"]
                 gemma_transcript_total_tokens += chunk_result["output_tokens"]
@@ -466,7 +485,6 @@ else:
             gemma_tps_avg = gemma_transcript_total_tokens / gemma_transcript_total_time if gemma_transcript_total_time > 0 else 0
             print(f"  ✅ Gemma transcript total: {len(gemma_full_transcript)} chars | {gemma_transcript_total_time:.1f}s | {gemma_tps_avg:.1f} tok/s")
 
-            # Simpan metrics
             metrics.append(f"Gemma transcript ({len(chunks)} chunks): {len(gemma_full_transcript)} chars | {gemma_transcript_total_time:.1f}s | {gemma_tps_avg:.1f} tok/s")
 
         except Exception as e:
@@ -474,7 +492,7 @@ else:
 
         print("📋 Summarizing...")
         summary_result = summarize_transcript(
-            proc, gemma, result["transcript"], context="rekaman audio"
+            proc, gemma, result["transcript"], context="rekaman audio", drafter=drafter
         )
         result["summary"] = summary_result["text"]
         print(f"  ✅ Summary: {summary_result['output_tokens']} tokens | {summary_result['time_s']}s | {summary_result['tps']} tok/s")
@@ -489,19 +507,18 @@ else:
             try:
                 from IPython.display import display as ipy_display
                 img_preview = Image.open(img_path)
-                # Resize jika terlalu besar
                 if max(img_preview.size) > 600:
                     img_preview.thumbnail((600, 600), Image.LANCZOS)
                 ipy_display(img_preview)
             except Exception:
                 pass
 
-            ocr = ocr_image(proc, gemma, img_path)
+            ocr = ocr_image(proc, gemma, img_path, drafter=drafter)
             result["ocr"].append({"file": os.path.basename(img_path), "text": ocr["text"]})
             print(f"  ✅ OCR: {ocr['output_tokens']} tokens | {ocr['time_s']}s | {ocr['tps']} tok/s")
             metrics.append(f"OCR {os.path.basename(img_path)}: {ocr['time_s']}s | {ocr['output_tokens']} tokens | {ocr['tps']} tok/s")
 
-    unload_gemma(proc, gemma)
+    unload_gemma(proc, gemma, drafter)
 
     # ── Hasil ──
     print("\n" + "=" * 50)
