@@ -173,11 +173,21 @@ def start_vllm_server():
         gc.collect()
         torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    free, total = torch.cuda.mem_get_info(0)
-    print(f"  📊 GPU 0 free: {free/1e9:.1f}GB / {total/1e9:.1f}GB total")
 
-    if free < 8e9:
-        print(f"  ⚠️ VRAM tidak cukup ({free/1e9:.1f}GB free). Turunkan gpu-memory-utilization.")
+    # Cari GPU dengan VRAM paling banyak
+    best_gpu = 0
+    best_free = 0
+    for i in range(torch.cuda.device_count()):
+        free, total = torch.cuda.mem_get_info(i)
+        print(f"  📊 GPU {i}: {free/1e9:.1f}GB free / {total/1e9:.1f}GB total")
+        if free > best_free:
+            best_free = free
+            best_gpu = i
+
+    print(f"  🎯 Using GPU {best_gpu} ({best_free/1e9:.1f}GB free)")
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(best_gpu)
 
     cmd = [
         "python", "-m", "vllm.entrypoints.openai.api_server",
@@ -200,6 +210,7 @@ def start_vllm_server():
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        env=env,
     )
 
     # Tunggu server ready (max 120s)
