@@ -186,8 +186,8 @@ def start_vllm_server():
 
     print(f"  🎯 Using GPU {best_gpu} ({best_free/1e9:.1f}GB free)")
 
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(best_gpu)
+    # Set GPU sebelum start vLLM
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(best_gpu)
 
     cmd = [
         "python", "-m", "vllm.entrypoints.openai.api_server",
@@ -210,7 +210,6 @@ def start_vllm_server():
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env=env,
     )
 
     # Tunggu server ready (max 120s)
