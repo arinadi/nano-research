@@ -220,7 +220,7 @@ def stop_vllm_server(vllm_proc):
         print("  🧹 vLLM server stopped")
 
 
-def vllm_generate(client, messages: list, max_new_tokens: int = 512) -> dict:
+def vllm_generate(client, messages: list, max_new_tokens: int = 4096) -> dict:
     """Generate via vLLM OpenAI-compatible API. Return dict dengan text + metrics."""
     t0 = time.perf_counter()
     response = client.chat.completions.create(
@@ -295,7 +295,7 @@ def ocr_image(client, image_input, language_hint: str = "Indonesia") -> dict:
         ]
     }]
 
-    return vllm_generate(client, messages, max_new_tokens=1000)
+    return vllm_generate(client, messages, max_new_tokens=4096)
 
 
 def summarize_transcript(client, transcript: str, context: str = "") -> dict:
@@ -314,7 +314,7 @@ def summarize_transcript(client, transcript: str, context: str = "") -> dict:
         )
     }]
 
-    return vllm_generate(client, messages, max_new_tokens=800)
+    return vllm_generate(client, messages, max_new_tokens=4096)
 
 
 def transcribe_audio_gemma(client, audio_path: str) -> dict:
@@ -338,7 +338,7 @@ def transcribe_audio_gemma(client, audio_path: str) -> dict:
         ]
     }]
 
-    return vllm_generate(client, messages, max_new_tokens=1024)
+    return vllm_generate(client, messages, max_new_tokens=4096)
 
 
 def transcribe_audio_gemma_chunked(client, audio_path: str, chunk_sec: int = 30) -> dict:
