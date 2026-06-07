@@ -108,66 +108,6 @@ print(json.dumps(result))
     return result
 
 
-def transcribe_audio(audio_path: str, language: str = "id") -> dict:
-    """
-    Transcript audio dengan Faster-Whisper large-v3.
-
-    Args:
-        audio_path: Path ke file audio (WAV, MP3, FLAC, OGG, M4A)
-        language: Kode bahasa. "id" untuk Bahasa Indonesia, None untuk auto-detect
-
-    Returns:
-        dict dengan keys: text, segments, language, duration
-    """
-    segments, info = batched_whisper.transcribe(
-        audio_path,
-        language=language,
-        batch_size=16,
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=500),
-        log_progress=True,
-    )
-
-    all_segments = []
-    full_text = []
-
-    for seg in segments:
-        all_segments.append({
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text.strip(),
-        })
-        full_text.append(seg.text.strip())
-
-    return {
-        "text": " ".join(full_text),
-        "segments": all_segments,
-        "language": info.language,
-        "duration": info.duration,
-    }
-
-
-def transcribe_long_audio(audio_path: str, language: str = "id",
-                           chunk_minutes: int = 30) -> str:
-    """Transcript audio panjang dengan chunking."""
-    import librosa, soundfile as sf
-
-    audio, sr = librosa.load(audio_path, sr=16000, mono=True)
-    chunk_samples = chunk_minutes * 60 * sr
-    chunks = [audio[i:i+chunk_samples] for i in range(0, len(audio), chunk_samples)]
-
-    all_text = []
-    for i, chunk in enumerate(chunks):
-        chunk_path = f"/tmp/chunk_{i}.wav"
-        sf.write(chunk_path, chunk, sr)
-        result = transcribe_audio(chunk_path, language=language)
-        all_text.append(result["text"])
-        print(f"  Chunk {i+1}/{len(chunks)} done: {len(result['text'])} chars")
-
-    return " ".join(all_text)
-
-
 # ============================================================
 # MODULE 2: vLLM + MTP SERVER (Gemma 4 E4B)
 # ============================================================
