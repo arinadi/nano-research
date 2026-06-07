@@ -22,14 +22,13 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 
 | Component | VRAM |
 |---|---|
-| Faster-Whisper large-v3 (FP16) | ~3 GB |
-| Gemma 4 E4B (bfloat16, 1 GPU) | ~8 GB |
-| MTP Drafter (~277 MB) | ~0.3 GB |
-| OS + overhead | ~2 GB |
-| **Total** | **~13 GB** (1 GPU, sequential) |
+| vLLM Gemma 4 E4B + MTP (BF16, 90% util) | ~14 GB |
+| OS + overhead | ~1.5 GB |
+| **Total** | **~15.5 GB** (1 GPU) |
 
-> **Note:** Sequential loading — Whisper dan Gemma load bergantian.
-> MTP drafter memberikan ~2× speedup tanpa tambahan VRAM signifikan.
+> **Note:** Whisper di-load SEBELUM vLLM start, lalu di-unload.
+> vLLM ambil hampir seluruh VRAM untuk KV cache + model.
+> Estimasi throughput: **~25–35 tok/s** (vs ~6 tok/s HF Transformers).
 
 ---
 
@@ -38,7 +37,7 @@ Karena Whisper dan Gemma adalah model terpisah, Anda bisa load keduanya sekaligu
 ```python
 # ============================================================
 # PIPELINE: Transcript + OCR + Summarization
-# Stack: Faster-Whisper large-v3 | Gemma 4 E4B
+# Stack: Faster-Whisper large-v3 | vLLM + MTP (Gemma 4 E4B)
 # Target: Kaggle Free GPU (T4 16GB)
 # ============================================================
 
@@ -46,18 +45,17 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import os, sys
-# Suppress pip dependency warnings (dask-cuda, cuml, cudf conflicts — tidak dipakai pipeline ini)
-!pip install -q faster-whisper accelerate librosa soundfile bitsandbytes 2>&1 | grep -v "ERROR\|requires\|incompatible"
-!pip install -q git+https://github.com/huggingface/transformers.git 2>&1 | grep -v "ERROR\|requires\|incompatible"
-!pip install -q "pillow==11.1.0" --force-reinstall --no-deps 2>&1 | grep -v "ERROR\|requires\|incompatible"
+# Suppress pip dependency warnings
+!pip install -q faster-whisper librosa soundfile 2>&1 | grep -v "ERROR\|requires\|incompatible"
+!pip install -q vllm "vllm[audio]" 2>&1 | grep -v "ERROR\|requires\|incompatible"
 
-import os, time, torch, gc
+import os, time, torch, gc, base64, pathlib, subprocess, signal
 import numpy as np
 from PIL import Image
 from io import BytesIO
 
 print("=" * 60)
-print("PIPELINE: Whisper large-v3 + Gemma 4 E4B")
+print("PIPELINE: Whisper large-v3 + vLLM + MTP (Gemma 4 E4B)")
 print(f"GPU: {torch.cuda.get_device_name(0)}")
 print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 print("=" * 60)
@@ -65,8 +63,6 @@ print("=" * 60)
 # ============================================================
 # MODULE 1: FASTER-WHISPER TRANSCRIPT
 # ============================================================
-# NOTE: Whisper dan Gemma TIDAK bisa load bersamaan di T4 (16GB).
-# Strategy: load Whisper → transcribe → unload → load Gemma.
 
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 
@@ -156,178 +152,233 @@ def transcribe_long_audio(audio_path: str, language: str = "id",
 
 
 # ============================================================
-# MODULE 2: GEMMA 4 E4B — OCR + SUMMARIZATION
+# MODULE 2: vLLM + MTP SERVER (Gemma 4 E4B)
 # ============================================================
+# vLLM serve Gemma 4 E4B + MTP drafter via OpenAI-compatible API.
+# Throughput ~25–35 tok/s di T4 (vs ~6 tok/s HF Transformers).
 
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from openai import OpenAI
 
-GEMMA_MODEL_ID = "google/gemma-4-E4B-it"
+VLLM_PORT = 8000
+VLLM_MODEL = "google/gemma-4-E4B-it"
+VLLM_DRAFTER = "google/gemma-4-E4B-it-assistant"
 
-GEMMA_DRAFT_ID = "google/gemma-4-E4B-it-assistant"  # MTP drafter (~277 MB)
-
-def load_gemma():
-    print("\n[2/3] Loading Gemma 4 E4B + MTP drafter...")
+def start_vllm_server():
+    """Start vLLM server dengan MTP drafter di background."""
+    print("\n[2/3] Starting vLLM + MTP server...")
     t0 = time.time()
-    proc = AutoProcessor.from_pretrained(GEMMA_MODEL_ID, trust_remote_code=True)
 
-    # Tampilkan info GPU
-    for i in range(torch.cuda.device_count()):
-        free, total = torch.cuda.mem_get_info(i)
-        print(f"  📊 GPU {i}: {free/1e9:.1f}GB free / {total/1e9:.1f}GB total")
-
-    # Target model — satu GPU saja, hindari tensor parallel overhead
-    model = AutoModelForImageTextToText.from_pretrained(
-        GEMMA_MODEL_ID,
-        dtype=torch.bfloat16,
-        device_map="cuda:0",
-        trust_remote_code=True,
-        low_cpu_mem_usage=True,
-    )
-    model.eval()
-
-    # MTP drafter — prediksi beberapa token sekaligus, kualitas identik
-    drafter = AutoModelForImageTextToText.from_pretrained(
-        GEMMA_DRAFT_ID,
-        dtype=torch.bfloat16,
-        device_map="cuda:0",
-        trust_remote_code=True,
-    )
-    drafter.eval()
-
-    print(f"  ✅ Gemma + MTP loaded in {time.time()-t0:.1f}s")
-    used = torch.cuda.memory_allocated(0) / 1e9
-    print(f"  📊 GPU 0 VRAM used: {used:.2f} GB")
-    return proc, model, drafter
-
-def unload_gemma(proc, model, drafter=None):
-    """Unload Gemma + drafter dari VRAM."""
-    import gc
-    if drafter is not None:
-        del drafter
-    del model, proc
+    # Unload Whisper dulu, free VRAM
     gc.collect()
     torch.cuda.empty_cache()
-    print("  🧹 Gemma + MTP unloaded from VRAM")
+
+    cmd = [
+        "python", "-m", "vllm.entrypoints.openai.api_server",
+        "--model", VLLM_MODEL,
+        "--dtype", "bfloat16",
+        "--max-model-len", "32768",
+        "--gpu-memory-utilization", "0.90",
+        "--limit-mm-per-prompt", '{"image": 4, "audio": 1}',
+        "--speculative-model", VLLM_DRAFTER,
+        "--speculative-model-uses-vllm-mtp-path",
+        "--host", "0.0.0.0",
+        "--port", str(VLLM_PORT),
+    ]
+
+    # Jalankan vLLM server di background
+    vllm_proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    # Tunggu server ready (max 120s)
+    client = OpenAI(base_url=f"http://localhost:{VLLM_PORT}/v1", api_key="EMPTY")
+    for i in range(120):
+        try:
+            client.models.list()
+            break
+        except Exception:
+            if vllm_proc.poll() is not None:
+                output = vllm_proc.stdout.read()
+                raise RuntimeError(f"vLLM server crashed:\n{output}")
+            time.sleep(1)
+    else:
+        raise RuntimeError("vLLM server timeout (120s)")
+
+    elapsed = time.time() - t0
+    print(f"  ✅ vLLM + MTP server ready in {elapsed:.1f}s (port {VLLM_PORT})")
+    return vllm_proc, client
 
 
-def gemma_generate(proc, model, messages: list, max_new_tokens: int = 512, drafter=None) -> dict:
-    """Helper untuk generate dari Gemma 4 E4B. Return dict dengan text + metrics."""
-    inputs = proc.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt"
-    ).to("cuda:0")
+def stop_vllm_server(vllm_proc):
+    """Stop vLLM server."""
+    if vllm_proc and vllm_proc.poll() is None:
+        vllm_proc.terminate()
+        vllm_proc.wait(timeout=10)
+        print("  🧹 vLLM server stopped")
 
-    input_len = inputs["input_ids"].shape[-1]
 
-    gen_kwargs = {
-        "max_new_tokens": max_new_tokens,
-        "do_sample": False,
-    }
-    # MTP drafter untuk speculative decoding (~2× lebih cepat)
-    if drafter is not None:
-        gen_kwargs["assistant_model"] = drafter
-
+def vllm_generate(client, messages: list, max_new_tokens: int = 512) -> dict:
+    """Generate via vLLM OpenAI-compatible API. Return dict dengan text + metrics."""
     t0 = time.perf_counter()
-    with torch.inference_mode():
-        outputs = model.generate(**inputs, **gen_kwargs)
+    response = client.chat.completions.create(
+        model=VLLM_MODEL,
+        messages=messages,
+        max_tokens=max_new_tokens,
+        temperature=0,
+    )
     elapsed = time.perf_counter() - t0
 
-    output_ids = outputs[0][input_len:]
-    text = proc.decode(output_ids, skip_special_tokens=True).strip()
-    tokens_out = len(output_ids)
+    text = response.choices[0].message.content or ""
+    usage = response.usage
+    tokens_in = usage.prompt_tokens if usage else 0
+    tokens_out = usage.completion_tokens if usage else 0
     tps = tokens_out / elapsed if elapsed > 0 else 0
 
     return {
-        "text": text,
-        "input_tokens": input_len,
+        "text": text.strip(),
+        "input_tokens": tokens_in,
         "output_tokens": tokens_out,
         "time_s": round(elapsed, 2),
         "tps": round(tps, 1),
     }
 
 
-def ocr_image(proc, model, image_input, language_hint: str = "Indonesia", drafter=None) -> dict:
-    """OCR + baca teks dari gambar. Return dict dengan text + metrics."""
+def encode_image_base64(image_input) -> str:
+    """Encode image ke base64 untuk vLLM API."""
     if isinstance(image_input, str):
         if image_input.startswith("http"):
             import requests
-            img = Image.open(BytesIO(requests.get(image_input).content))
+            return base64.b64encode(requests.get(image_input).content).decode()
         else:
-            img = Image.open(image_input)
+            return base64.b64encode(pathlib.Path(image_input).read_bytes()).decode()
     elif isinstance(image_input, Image.Image):
-        img = image_input
+        buf = BytesIO()
+        image_input.save(buf, format="JPEG", quality=90)
+        return base64.b64encode(buf.getvalue()).decode()
     else:
         raise ValueError("image_input harus path, URL, atau PIL.Image")
+
+
+def encode_audio_base64(audio_path: str) -> tuple[str, str]:
+    """Encode audio ke base64. Return (base64_data, mime_type)."""
+    ext = pathlib.Path(audio_path).suffix.lstrip(".").lower()
+    mime = {"m4a": "audio/mp4", "mp3": "audio/mpeg", "wav": "audio/wav",
+            "flac": "audio/flac", "ogg": "audio/ogg"}.get(ext, "audio/wav")
+    data = base64.b64encode(pathlib.Path(audio_path).read_bytes()).decode()
+    return data, mime
+
+
+def ocr_image(client, image_input, language_hint: str = "Indonesia") -> dict:
+    """OCR + baca teks dari gambar via vLLM. Return dict dengan text + metrics."""
+    img_b64 = encode_image_base64(image_input)
 
     messages = [{
         "role": "user",
         "content": [
-            {"type": "image", "image": img},
-            {"type": "text", "text": (
-                f"Baca semua teks dalam gambar ini secara lengkap dan akurat. "
-                f"Bahasa dominan: {language_hint}. "
-                f"Pertahankan struktur asli (baris, spasi, tabel). "
-                f"Jika ada angka atau harga, jangan ada yang terlewat. "
-                f"Output hanya teks yang terlihat di gambar, tanpa penjelasan atau analisis."
-            )}
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+            },
+            {
+                "type": "text",
+                "text": (
+                    f"Baca semua teks dalam gambar ini secara lengkap dan akurat. "
+                    f"Bahasa dominan: {language_hint}. "
+                    f"Pertahankan struktur asli (baris, spasi, tabel). "
+                    f"Jika ada angka atau harga, jangan ada yang terlewat. "
+                    f"Output hanya teks yang terlihat di gambar, tanpa penjelasan atau analisis."
+                )
+            }
         ]
     }]
 
-    return gemma_generate(proc, model, messages, max_new_tokens=1000, drafter=drafter)
+    return vllm_generate(client, messages, max_new_tokens=1000)
 
 
-def summarize_text(proc, model, text: str, output_language: str = "Indonesia",
-                   style: str = "ringkas", drafter=None) -> dict:
-    """Summarize teks panjang. Return dict dengan summary + metrics."""
-    if style == "ringkas":
-        format_instruction = (
-            "Format: 3-4 kalimat ringkasan utama, lalu 3-5 poin kunci (bullet), "
-            "lalu 1 kalimat kesimpulan."
-        )
-    else:
-        format_instruction = (
-            "Format: Ringkasan komprehensif dengan konteks, poin-poin penting, "
-            "dan implikasi atau kesimpulan."
-        )
-
-    messages = [{
-        "role": "user",
-        "content": [{
-            "type": "text",
-            "text": (
-                f"Buat ringkasan dalam Bahasa {output_language}.\n"
-                f"{format_instruction}\n\n"
-                f"TEKS:\n{text}"
-            )
-        }]
-    }]
-
-    return gemma_generate(proc, model, messages, max_new_tokens=600, drafter=drafter)
-
-
-def summarize_transcript(proc, model, transcript: str, context: str = "", drafter=None) -> dict:
+def summarize_transcript(client, transcript: str, context: str = "") -> dict:
     """Summarize hasil transcript audio. Return dict dengan summary + metrics."""
     context_str = f"Konteks: {context}\n" if context else ""
 
     messages = [{
         "role": "user",
-        "content": [{
-            "type": "text",
-            "text": (
-                f"{context_str}"
-                f"Berikut adalah transcript audio. Buat ringkasan/notulensi dalam Bahasa Indonesia:\n"
-                f"- Poin-poin utama yang dibahas\n"
-                f"- Keputusan atau action item (jika ada)\n"
-                f"- Kesimpulan singkat\n\n"
-                f"TRANSCRIPT:\n{transcript}"
-            )
-        }]
+        "content": (
+            f"{context_str}"
+            f"Berikut adalah transcript audio. Buat ringkasan/notulensi dalam Bahasa Indonesia:\n"
+            f"- Poin-poin utama yang dibahas\n"
+            f"- Keputusan atau action item (jika ada)\n"
+            f"- Kesimpulan singkat\n\n"
+            f"TRANSCRIPT:\n{transcript}"
+        )
     }]
 
-    return gemma_generate(proc, model, messages, max_new_tokens=800, drafter=drafter)
+    return vllm_generate(client, messages, max_new_tokens=800)
+
+
+def transcribe_audio_gemma(client, audio_path: str) -> dict:
+    """Transcribe audio via Gemma 4 E4B (native audio support)."""
+    audio_b64, mime = encode_audio_base64(audio_path)
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {
+                "type": "audio_url",
+                "audio_url": {"url": f"data:{mime};base64,{audio_b64}"},
+            },
+            {
+                "type": "text",
+                "text": (
+                    "Transkrip audio ini secara lengkap dan akurat dalam Bahasa Indonesia. "
+                    "Output hanya teks transkrip, tanpa komentar."
+                )
+            }
+        ]
+    }]
+
+    return vllm_generate(client, messages, max_new_tokens=1024)
+
+
+def transcribe_audio_gemma_chunked(client, audio_path: str, chunk_sec: int = 30) -> dict:
+    """Transcribe audio panjang per chunk via Gemma 4 E4B."""
+    import librosa
+    import soundfile as sf
+
+    audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+    duration = len(audio) / sr
+    chunk_samples = chunk_sec * sr
+    chunks = [audio[i:i+chunk_samples] for i in range(0, len(audio), chunk_samples)]
+
+    print(f"  📊 Audio: {duration:.1f}s → {len(chunks)} chunk(s) à {chunk_sec}s")
+
+    parts = []
+    total_time = 0
+    total_tokens = 0
+
+    for ci, chunk in enumerate(chunks):
+        chunk_path = f"/tmp/gemma_chunk_{ci}.wav"
+        sf.write(chunk_path, chunk, sr)
+
+        print(f"  🎙️ Chunk {ci+1}/{len(chunks)}...", end=" ", flush=True)
+        result = transcribe_audio_gemma(client, chunk_path)
+        parts.append(result["text"])
+        total_time += result["time_s"]
+        total_tokens += result["output_tokens"]
+        print(f"✅ {result['output_tokens']} tokens | {result['time_s']}s | {result['tps']} tok/s")
+
+        os.remove(chunk_path)
+
+    full_text = " ".join(parts)
+    avg_tps = total_tokens / total_time if total_time > 0 else 0
+
+    return {
+        "text": full_text,
+        "output_tokens": total_tokens,
+        "time_s": round(total_time, 2),
+        "tps": round(avg_tps, 1),
+    }
 
 
 # ============================================================
@@ -427,72 +478,24 @@ else:
         metrics.append(f"Whisper transcript: {whisper_time:.1f}s | {len(transcript['text'])} chars")
         unload_whisper(whisper_m)
 
-    # ── Phase 2: OCR + Summarize ──
-    print("\n🤖 [2/2] Loading Gemma 4 E4B + MTP drafter...")
-    proc, gemma, drafter = load_gemma()
+    # ── Phase 2: Start vLLM + MTP Server ──
+    print("\n🤖 [2/2] Starting vLLM + MTP server...")
+    vllm_proc, client = start_vllm_server()
 
     if AUDIO_PATH and result.get("transcript"):
-        # ── Bonus: Gemma Transcript Test (per 30s chunk) ──
-        print("\n🎙️ [Bonus] Testing Gemma transcript (per 30s chunk)...")
+        # ── Bonus: Gemma Transcript Test ──
+        print("\n🎙️ [Bonus] Testing Gemma transcript via vLLM...")
         try:
-            import librosa
-            import soundfile as sf
-
-            audio, sr = librosa.load(AUDIO_PATH, sr=16000, mono=True)
-            duration = len(audio) / sr
-            chunk_sec = 30
-            chunk_samples = chunk_sec * sr
-            chunks = [audio[i:i+chunk_samples] for i in range(0, len(audio), chunk_samples)]
-
-            print(f"  📊 Audio: {duration:.1f}s → {len(chunks)} chunk(s) à {chunk_sec}s")
-
-            gemma_transcript_parts = []
-            gemma_transcript_total_time = 0
-            gemma_transcript_total_tokens = 0
-            for ci, chunk in enumerate(chunks):
-                chunk_path = f"/tmp/gemma_chunk_{ci}.wav"
-                sf.write(chunk_path, chunk, sr)
-
-                # Kirim audio ke Gemma — pakai numpy array langsung
-                messages = [{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "audio",
-                            "audio": chunk,  # numpy array langsung
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                "Transkrip audio ini secara lengkap dan akurat dalam Bahasa Indonesia. "
-                                "Output hanya teks transkrip, tanpa komentar."
-                            )
-                        }
-                    ]
-                }]
-
-                print(f"  🎙️ Chunk {ci+1}/{len(chunks)}...", end=" ", flush=True)
-                chunk_result = gemma_generate(proc, gemma, messages, max_new_tokens=800, drafter=drafter)
-                gemma_transcript_parts.append(chunk_result["text"])
-                gemma_transcript_total_time += chunk_result["time_s"]
-                gemma_transcript_total_tokens += chunk_result["output_tokens"]
-                print(f"✅ {chunk_result['output_tokens']} tokens | {chunk_result['time_s']}s | {chunk_result['tps']} tok/s")
-
-                os.remove(chunk_path)
-
-            gemma_full_transcript = " ".join(gemma_transcript_parts)
-            result["gemma_transcript"] = gemma_full_transcript
-            gemma_tps_avg = gemma_transcript_total_tokens / gemma_transcript_total_time if gemma_transcript_total_time > 0 else 0
-            print(f"  ✅ Gemma transcript total: {len(gemma_full_transcript)} chars | {gemma_transcript_total_time:.1f}s | {gemma_tps_avg:.1f} tok/s")
-
-            metrics.append(f"Gemma transcript ({len(chunks)} chunks): {len(gemma_full_transcript)} chars | {gemma_transcript_total_time:.1f}s | {gemma_tps_avg:.1f} tok/s")
-
+            gemma_result = transcribe_audio_gemma_chunked(client, AUDIO_PATH, chunk_sec=30)
+            result["gemma_transcript"] = gemma_result["text"]
+            print(f"  ✅ Gemma transcript: {len(gemma_result['text'])} chars | {gemma_result['time_s']}s | {gemma_result['tps']} tok/s")
+            metrics.append(f"Gemma transcript: {gemma_result['time_s']}s | {gemma_result['output_tokens']} tokens | {gemma_result['tps']} tok/s")
         except Exception as e:
             print(f"  ⚠️ Gemma transcript error: {e}")
 
         print("📋 Summarizing...")
         summary_result = summarize_transcript(
-            proc, gemma, result["transcript"], context="rekaman audio", drafter=drafter
+            client, result["transcript"], context="rekaman audio"
         )
         result["summary"] = summary_result["text"]
         print(f"  ✅ Summary: {summary_result['output_tokens']} tokens | {summary_result['time_s']}s | {summary_result['tps']} tok/s")
@@ -513,12 +516,13 @@ else:
             except Exception:
                 pass
 
-            ocr = ocr_image(proc, gemma, img_path, drafter=drafter)
+            ocr = ocr_image(client, img_path)
             result["ocr"].append({"file": os.path.basename(img_path), "text": ocr["text"]})
             print(f"  ✅ OCR: {ocr['output_tokens']} tokens | {ocr['time_s']}s | {ocr['tps']} tok/s")
             metrics.append(f"OCR {os.path.basename(img_path)}: {ocr['time_s']}s | {ocr['output_tokens']} tokens | {ocr['tps']} tok/s")
 
-    unload_gemma(proc, gemma, drafter)
+    # ── Cleanup ──
+    stop_vllm_server(vllm_proc)
 
     # ── Hasil ──
     print("\n" + "=" * 50)
