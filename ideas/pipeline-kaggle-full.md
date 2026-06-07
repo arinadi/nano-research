@@ -175,7 +175,7 @@ def start_vllm_server():
     cmd = [
         "python", "-m", "vllm.entrypoints.openai.api_server",
         "--model", VLLM_MODEL,
-        "--dtype", "bfloat16",
+        "--dtype", "half",
         "--max-model-len", "32768",
         "--gpu-memory-utilization", "0.90",
         "--limit-mm-per-prompt", '{"image": 4, "audio": 1}',
