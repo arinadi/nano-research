@@ -120,25 +120,13 @@ VLLM_PORT = 8000
 VLLM_MODEL = "google/gemma-4-E4B-it"
 VLLM_DRAFTER = "google/gemma-4-E4B-it-assistant"
 
-def aggressive_vram_free():
-    """Kembalikan memori GPU ke OS, bukan hanya ke PyTorch cache."""
-    gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.ipc_collect()
-    torch.cuda.memory.set_per_process_memory_fraction(0.0)
-    torch.cuda.empty_cache()
-    torch.cuda.memory.set_per_process_memory_fraction(1.0)
-    free, total = torch.cuda.mem_get_info(0)
-    print(f"  📊 VRAM setelah free: {free/1e9:.1f}GB free / {total/1e9:.1f}GB total")
-
-
 def start_vllm_server():
-    """Start vLLM server dengan MTP drafter di background."""
-    print("\n[2/3] Starting vLLM + MTP server...")
+    """
+    Start vLLM server di SUBPROCESS terpisah.
+    VRAM benar-benar bebas — tidak ada PyTorch allocator dari Jupyter kernel.
+    """
+    print("\n[2/3] Starting vLLM + MTP server (subprocess)...")
     t0 = time.time()
-
-    # Aggressively free VRAM
-    aggressive_vram_free()
 
     # Cari GPU dengan VRAM paling banyak
     best_gpu = 0
@@ -150,47 +138,49 @@ def start_vllm_server():
             best_free = free
             best_gpu = i
 
-    print(f"  🎯 Using GPU {best_gpu} ({best_free/1e9:.1f}GB free)")
+    print(f"  🎯 Target: GPU {best_gpu} ({best_free/1e9:.1f}GB free)")
 
-    # Set GPU sebelum start vLLM
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(best_gpu)
-
-    cmd = [
-        "python", "-m", "vllm.entrypoints.openai.api_server",
-        "--model", VLLM_MODEL,
-        "--dtype", "half",
-        "--max-model-len", "16384",
-        "--gpu-memory-utilization", "0.92",
-        "--limit-mm-per-prompt", '{"image": 2, "audio": 1}',
-        "--spec-method", "mtp",
-        "--spec-model", VLLM_DRAFTER,
-        "--spec-tokens", "3",
-        "--host", "0.0.0.0",
-        "--port", str(VLLM_PORT),
-        "--enforce-eager",
-    ]
-
-    # Jalankan vLLM server di background
+    # vLLM server script — jalan di subprocess sendiri
+    vllm_script = f'''
+import os, sys, subprocess
+os.environ["CUDA_VISIBLE_DEVICES"] = "{best_gpu}"
+cmd = [
+    sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+    "--model", "{VLLM_MODEL}",
+    "--dtype", "half",
+    "--max-model-len", "16384",
+    "--gpu-memory-utilization", "0.92",
+    "--limit-mm-per-prompt", "{{\\"image\\": 2, \\"audio\\": 1}}",
+    "--spec-method", "mtp",
+    "--spec-model", "{VLLM_DRAFTER}",
+    "--spec-tokens", "3",
+    "--host", "0.0.0.0",
+    "--port", "{VLLM_PORT}",
+    "--enforce-eager",
+]
+proc = subprocess.Popen(cmd)
+proc.wait()
+'''
     vllm_proc = subprocess.Popen(
-        cmd,
+        [sys.executable, "-c", vllm_script],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
 
-    # Tunggu server ready (max 120s)
+    # Tunggu server ready (max 180s — model download butuh waktu)
     client = OpenAI(base_url=f"http://localhost:{VLLM_PORT}/v1", api_key="EMPTY")
-    for i in range(120):
+    for i in range(180):
         try:
             client.models.list()
             break
         except Exception:
             if vllm_proc.poll() is not None:
                 output = vllm_proc.stdout.read()
-                raise RuntimeError(f"vLLM server crashed:\n{output}")
+                raise RuntimeError(f"vLLM server crashed:\n{output[-1000:]}")
             time.sleep(1)
     else:
-        raise RuntimeError("vLLM server timeout (120s)")
+        raise RuntimeError("vLLM server timeout (180s)")
 
     elapsed = time.time() - t0
     print(f"  ✅ vLLM + MTP server ready in {elapsed:.1f}s (port {VLLM_PORT})")
