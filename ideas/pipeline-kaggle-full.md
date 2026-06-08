@@ -140,29 +140,28 @@ def start_vllm_server():
 
     print(f"  🎯 Target: GPU {best_gpu} ({best_free/1e9:.1f}GB free)")
 
-    # vLLM server script — jalan di subprocess sendiri
-    vllm_script = f'''
-import os, sys, subprocess
+    # Tulis vLLM server script ke file (hindari nested subprocess issues)
+    vllm_script_path = "/tmp/vllm_server.py"
+    with open(vllm_script_path, "w") as f:
+        f.write(f'''
+import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "{best_gpu}"
-cmd = [
-    sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-    "--model", "{VLLM_MODEL}",
-    "--dtype", "half",
-    "--max-model-len", "16384",
-    "--gpu-memory-utilization", "0.92",
-    "--limit-mm-per-prompt", "{{\\"image\\": 2, \\"audio\\": 1}}",
-    "--spec-method", "mtp",
-    "--spec-model", "{VLLM_DRAFTER}",
-    "--spec-tokens", "3",
-    "--host", "0.0.0.0",
-    "--port", "{VLLM_PORT}",
-    "--enforce-eager",
-]
-proc = subprocess.Popen(cmd)
-proc.wait()
-'''
+os.system("python -m vllm.entrypoints.openai.api_server "
+          "--model {VLLM_MODEL} "
+          "--dtype half "
+          "--max-model-len 16384 "
+          "--gpu-memory-utilization 0.92 "
+          '--limit-mm-per-prompt \'{{"image": 2, "audio": 1}}\' '
+          "--spec-method mtp "
+          "--spec-model {VLLM_DRAFTER} "
+          "--spec-tokens 3 "
+          "--host 0.0.0.0 "
+          "--port {VLLM_PORT} "
+          "--enforce-eager")
+''')
+
     vllm_proc = subprocess.Popen(
-        [sys.executable, "-c", vllm_script],
+        [sys.executable, vllm_script_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -177,7 +176,7 @@ proc.wait()
         except Exception:
             if vllm_proc.poll() is not None:
                 output = vllm_proc.stdout.read()
-                raise RuntimeError(f"vLLM server crashed:\n{output[-1000:]}")
+                raise RuntimeError(f"vLLM server crashed:\n{output[-2000:]}")
             time.sleep(1)
     else:
         raise RuntimeError("vLLM server timeout (180s)")
